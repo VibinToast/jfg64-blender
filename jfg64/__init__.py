@@ -23,7 +23,7 @@ bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
     "version": (0, 1, 0),
-    "blender": (3, 5, 0),
+    "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, vertex light, budgets and markers for JFG-Studio levels",
     "category": "Import-Export",
@@ -220,10 +220,12 @@ class JFG_OT_export(bpy.types.Operator):
 
 
 def export(path):
+    # The vertex colours are the "Col" layer Vertex light bakes, picked by name.
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_visible=True, export_extras=True,
-                              export_yup=True, export_apply=True, export_colors=True, export_normals=False,
-                              export_animations=False, export_skins=False, export_morph=False,
-                              export_cameras=False, export_lights=False)
+                              export_yup=True, export_apply=True, export_normals=False,
+                              export_vertex_color="NAME", export_vertex_color_name="Col",
+                              export_all_vertex_colors=False, export_animations=False, export_skins=False,
+                              export_morph=False, export_cameras=False, export_lights=False)
 
 
 class JFG64Settings(bpy.types.PropertyGroup):

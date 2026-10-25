@@ -1,6 +1,6 @@
 # jfg64: Jet Force Gemini levels in Blender
 
-A Blender add-on (Blender 3.5 or newer) for making level geometry for
+A Blender add-on (Blender 5.2 or newer) for making level geometry for
 [JFG-Studio](https://github.com/VibinToast/JFG-Studio), the level and modpack editor for
 [Jet Force Gemini: Recompiled](https://github.com/VibinToast/JetForceGemini-Recomp). It makes the common steps quick
 and shows the game's budgets while you model. It writes nothing Studio can't also read from a plain glTF export.
@@ -12,7 +12,7 @@ and shows the game's budgets while you model. It writes nothing Studio can't als
 
 1. Download `jfg64.zip` from the [Releases](https://github.com/VibinToast/jfg64-blender/releases) page (or zip the
    `jfg64` folder of this repo yourself, so the zip holds `jfg64/__init__.py`).
-2. Blender › Edit › Preferences › Add-ons › Install…, pick the zip, and tick **jfg64: Jet Force Gemini levels**.
+2. Blender › Edit › Preferences › Add-ons, the ▾ menu at the top right › **Install from Disk…**, pick the zip, and tick **jfg64: Jet Force Gemini levels**.
 3. In the 3D View press N and open the **JFG** tab.
 
 GitHub's green "Download ZIP" button gives a folder named `jfg64-blender-main`, which Blender can't load as an add-on:
