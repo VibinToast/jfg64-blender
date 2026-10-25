@@ -10,13 +10,24 @@ In the 3D View's sidebar (N), tab "JFG":
 - Export: a .glb with the settings Studio needs.
 
 Studio checks every file with the game's own importer; this add-on only makes the common things quick.
+
+Scripting (an AI agent through a Blender MCP server, or any script): `import jfg64`, then
+- set_surface(material, kind): kind is one of SURFACES (solid, water, lava, kill, collider, nocollide);
+- bake_light(mesh, world_matrix, sun_dir, sun_colour, ambient, tint=False): one mesh; bake_scene(objects, tint=False):
+  several, with the panel's settings and the scene's Sun lamp;
+- budgets(objects) -> {"triangles", "images", "far", "surfaces"};
+- export(path, objects=None, collection=None): the visible objects, or only these objects / this collection;
+- add_marker(context, kind, name=None).
+Spaces: Blender's own (Z up, 1 unit = 1 game unit); the export turns it into the game's Y up. Colours are RGB 0-1.
+The game takes its colour from the vertex colours alone (the "Col" layer): a material's base colour is not used, so
+use bake_light's tint to carry it into the bake.
 """
 
 import json
 import math
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
 bl_info = {
@@ -30,11 +41,13 @@ bl_info = {
 }
 
 # Surface presets: (material-name word, batch flags, render pass, blend). Ground and walls are 0x1008 in stock tracks.
+# The importer ORs each name word's flag into batchFlags, so a kill floor keeps 0x1008 here and gets its 0x80000000
+# from the word "kill": Blender's integer properties are signed 32-bit and can't hold 0x80001008.
 SURFACES = {
     "solid": ("", 0x1008, "opaque", "OPAQUE"),
     "water": ("water", 0x1200D, "translucent", "BLEND"),
     "lava": ("lava", 0x9008, "opaque", "OPAQUE"),
-    "kill": ("kill", 0x80001008, "opaque", "OPAQUE"),
+    "kill": ("kill", 0x1008, "opaque", "OPAQUE"),
     "collider": ("collider", 0x1408, "opaque", "OPAQUE"),
     "nocollide": ("nocollide", 0x1008, "opaque", "OPAQUE"),
 }
@@ -103,8 +116,24 @@ class JFG_OT_surface(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def bake_light(mesh, world_matrix, sun_dir, sun_col, ambient, layer="Col"):
-    """Writes sun * max(0, n.l) + ambient into a byte colour attribute on face corners."""
+def material_colour(mat):
+    """A material's base colour (RGB 0-1): its Principled BSDF's Base Color, else its viewport colour; white for
+    none."""
+    if mat is None:
+        return (1.0, 1.0, 1.0)
+    if mat.node_tree:
+        for node in mat.node_tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                return tuple(node.inputs["Base Color"].default_value[:3])
+    return tuple(mat.diffuse_color[:3])
+
+
+def bake_light(mesh, world_matrix, sun_dir, sun_col, ambient, layer="Col", tint=False):
+    """Writes (ambient + sun * max(0, n.l)) into the byte colour layer `layer` on face corners, one colour per face.
+
+    world_matrix: the object's matrix_world. sun_dir: the direction the light travels, in Blender's world space (Z up;
+    (0, 0, -1) is straight down). sun_col, ambient: RGB 0-1. tint: multiply each face by its material's base colour
+    (material_colour), as the game draws only the vertex colours."""
     attr = mesh.color_attributes.get(layer)
     if attr is None or attr.domain != "CORNER" or attr.data_type != "BYTE_COLOR":
         if attr is not None:
@@ -113,13 +142,33 @@ def bake_light(mesh, world_matrix, sun_dir, sun_col, ambient, layer="Col"):
     mesh.color_attributes.active_color = attr
     normal_matrix = world_matrix.to_3x3().inverted_safe().transposed()
     to_light = -Vector(sun_dir).normalized()
+    tints = [material_colour(m) if tint else (1.0, 1.0, 1.0) for m in mesh.materials] or [(1.0, 1.0, 1.0)]
     for poly in mesh.polygons:
         n = (normal_matrix @ poly.normal).normalized()
         d = max(0.0, n.dot(to_light))
-        col = [min(1.0, ambient[i] + sun_col[i] * d) for i in range(3)]
+        t = tints[poly.material_index] if poly.material_index < len(tints) else (1.0, 1.0, 1.0)
+        col = [min(1.0, (ambient[i] + sun_col[i] * d) * t[i]) for i in range(3)]
         for li in poly.loop_indices:
             attr.data[li].color = (*col, 1.0)
     mesh.update()
+
+
+def scene_sun(scene):
+    """The direction the scene's light travels: its Sun lamp's, else the panel's Sun direction (Blender space)."""
+    sun = next((o for o in scene.objects if o.type == "LIGHT" and o.data.type == "SUN"), None)
+    return (sun.matrix_world.to_3x3() @ Vector((0, 0, -1))) if sun else Vector(scene.jfg64.sun_direction), sun
+
+
+def bake_scene(objects, tint=None, scene=None):
+    """Bakes the meshes among `objects` with the panel's sun and ambient colours and the scene's Sun lamp (tint: the
+    panel's setting when None). Returns how many meshes were lit."""
+    scene = scene or bpy.context.scene
+    s = scene.jfg64
+    direction, _ = scene_sun(scene)
+    meshes = [o for o in objects if o.type == "MESH"]
+    for o in meshes:
+        bake_light(o.data, o.matrix_world, direction, s.sun_colour, s.ambient, tint=s.tint if tint is None else tint)
+    return len(meshes)
 
 
 class JFG_OT_bake(bpy.types.Operator):
@@ -129,21 +178,18 @@ class JFG_OT_bake(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        s = context.scene.jfg64
-        sun = next((o for o in context.scene.objects if o.type == "LIGHT" and o.data.type == "SUN"), None)
-        direction = (sun.matrix_world.to_3x3() @ Vector((0, 0, -1))) if sun else Vector(s.sun_direction)
-        meshes = [o for o in context.selected_objects if o.type == "MESH"]
-        if not meshes:
+        _, sun = scene_sun(context.scene)
+        lit = bake_scene(context.selected_objects, scene=context.scene)
+        if not lit:
             self.report({"ERROR"}, "Select the level's meshes")
             return {"CANCELLED"}
-        for o in meshes:
-            bake_light(o.data, o.matrix_world, direction, s.sun_colour, s.ambient)
-        self.report({"INFO"}, f"Lit {len(meshes)} meshes" + (f" from {sun.name}" if sun else ""))
+        self.report({"INFO"}, f"Lit {lit} meshes" + (f" from {sun.name}" if sun else ""))
         return {"FINISHED"}
 
 
 def budgets(objects):
-    """What the game's importer will count: triangles, new images, the vertex range."""
+    """What the game's importer will count: {"triangles", "images" (new images: about NEW_IMAGES_ROOM fit), "far"
+    (the farthest vertex coordinate from the origin, at most VERTEX_MAX), "surfaces" (kinds in use)}."""
     tris, images, far = 0, set(), 0.0
     surfaces = set()
     for o in objects:
@@ -167,6 +213,8 @@ def budgets(objects):
 
 
 def add_marker(context, kind, name=None):
+    """An empty at the 3D cursor (kind: one of MARKERS) that Studio turns into an object when it makes a level from
+    the file; its "jfg_fields" custom property (JSON) holds the object's fields."""
     jfg_type, fields, display, size = MARKERS[kind]
     empty = bpy.data.objects.new(name or kind, None)
     empty.empty_display_type = display
@@ -219,19 +267,42 @@ class JFG_OT_export(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def export(path):
-    # The vertex colours are the "Col" layer Vertex light bakes, picked by name.
-    bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_visible=True, export_extras=True,
-                              export_yup=True, export_apply=True, export_normals=False,
-                              export_vertex_color="NAME", export_vertex_color_name="Col",
-                              export_all_vertex_colors=False, export_animations=False, export_skins=False,
-                              export_morph=False, export_cameras=False, export_lights=False)
+def export(path, objects=None, collection=None):
+    """A .glb for Studio: the visible objects, or only `objects` / the objects of `collection` (a Collection or its
+    name; they must be in the view layer). The vertex colours are the "Col" layer bake_light writes."""
+    if collection is not None:
+        coll = bpy.data.collections[collection] if isinstance(collection, str) else collection
+        objects = list(coll.all_objects)
+    options = dict(filepath=path, export_format="GLB", export_extras=True, export_yup=True, export_apply=True,
+                   export_normals=False, export_vertex_color="NAME", export_vertex_color_name="Col",
+                   export_all_vertex_colors=False, export_animations=False, export_skins=False, export_morph=False,
+                   export_cameras=False, export_lights=False)
+    if objects is None:
+        bpy.ops.export_scene.gltf(use_visible=True, **options)
+        return
+    layer = bpy.context.view_layer
+    selected, active = [o for o in layer.objects if o.select_get()], layer.objects.active
+    try:
+        for o in selected:
+            o.select_set(False)
+        for o in objects:
+            o.select_set(True)
+        bpy.ops.export_scene.gltf(use_selection=True, **options)
+    finally:
+        for o in objects:
+            o.select_set(False)
+        for o in selected:
+            o.select_set(True)
+        layer.objects.active = active
 
 
 class JFG64Settings(bpy.types.PropertyGroup):
     sun_direction: FloatVectorProperty(name="Sun direction", default=(-0.4, 0.3, -1.0), subtype="DIRECTION")
     sun_colour: FloatVectorProperty(name="Sun", default=(0.75, 0.72, 0.65), subtype="COLOR", min=0, max=1)
     ambient: FloatVectorProperty(name="Ambient", default=(0.35, 0.37, 0.45), subtype="COLOR", min=0, max=1)
+    tint: BoolProperty(name="Tint by material", default=False,
+                       description="Multiply the light by each face's material colour (the game draws only the "
+                                   "vertex colours)")
     start_number: IntProperty(name="Start point", default=0, min=0, max=255)
     yaw_note: FloatProperty(default=0.0)
 
@@ -260,6 +331,7 @@ class JFG_PT_panel(bpy.types.Panel):
         box.prop(s, "ambient")
         box.prop(s, "sun_direction")
         box.label(text="(a Sun lamp in the scene sets the direction)")
+        box.prop(s, "tint")
         box.operator("jfg64.bake_light")
         box = lay.box()
         box.label(text="Budgets (visible objects)")

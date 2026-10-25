@@ -24,7 +24,9 @@ use the release zip.
   Nocollide (drawn, not solid). It puts the word in the material's name and sets the custom properties (`batchFlags`,
   `pass`) the game's track importer reads.
 - **Vertex light**: bakes a sun and an ambient colour into the selected meshes' vertex colours (a `Col` byte colour
-  attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way.
+  attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way, and
+  the game draws only these colours, not a material's colour: tick **Tint by material** to bake each face's
+  material colour (its Base Color) in.
 - **Budgets**: triangles, images (about three new ones fit the game's texture table), the farthest vertex (the game
   takes up to 32767 units from the origin) and the surfaces in use.
 - **Markers**: empties at the 3D cursor that Studio turns into objects when it makes a level from the file:
@@ -34,6 +36,13 @@ use the release zip.
   animation or lights.
 
 Then in JFG-Studio: **File › New project…** with the `.glb` as Geometry, or **File › Import geometry…**.
+
+## Scripting
+
+Everything the panel does is also a function, for scripts and AI agents (through a Blender MCP server):
+`set_surface(material, kind)`, `bake_light(mesh, matrix_world, sun_dir, sun_colour, ambient, tint=False)`,
+`bake_scene(objects, tint=None)`, `budgets(objects)`, `export(path, objects=None, collection=None)` and
+`add_marker(context, kind)`. `help(jfg64)` lists them with the spaces and units each one takes.
 
 ## Test
 
