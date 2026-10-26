@@ -33,7 +33,12 @@ use the release zip.
   attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way, and
   the game draws only these colours, not a material's colour: tick **Tint by material** to bake each face's
   material colour (its Base Color) in.
-- **Budgets**: triangles, images (each becomes a new texture of the game's, at most 2048 pixels: 64 x 32 ...; bigger
+- **Game textures**: paint with the game's own level textures, from JFG-Studio's library of your own ROM (Studio
+  builds it in its data folder the first time you open a project). Pick one by colour or by the game level that uses
+  it, see it as a thumbnail, and **Use on active object**. A level painted with them carries none of them: Studio
+  names them by number and each player's game shows them. Don't edit their pixels: an edited copy is a new image,
+  and the game's art can't go in a pack (Studio refuses it).
+- **Budgets**: triangles, game textures (not carried), images (each becomes a new texture of the game's, at most 2048 pixels: 64 x 32 ...; bigger
   ones are shrunk), the farthest vertex (the game
   takes up to 32767 units from the origin) and the surfaces in use.
 - **Markers**: empties at the 3D cursor that Studio turns into objects when it makes a level from the file:
@@ -49,7 +54,11 @@ Then in JFG-Studio: **File › New project…** with the `.glb` as Geometry, or 
 Everything the panel does is also a function, for scripts and AI agents (through a Blender MCP server):
 `set_surface(material, kind)`, `bake_light(mesh, matrix_world, sun_dir, sun_colour, ambient, tint=False)`,
 `bake_scene(objects, tint=None)`, `budgets(objects)`, `export(path, objects=None, collection=None)` and
-`add_marker(context, kind)`. `export(collection=...)` works from any scene: it shows the collection's scene for
+`add_marker(context, kind)`; the game textures: `library_folder()`, `game_textures(words, level, size, limit)` and
+`game_texture_material(tex_id, surface)`; organic shapes: `terrain(...)` (ground from layered noise: hills, ridges
+or terraces, with flat clearings, carved paths, a rim of hills round the edge and walkable slopes),
+`terrain_report(obj)`, `rock(...)` (a lumpy boulder), `ground_height(obj, x, y)` and
+`scatter_points(obj, count, ...)` (spots on its gentle ground). `export(collection=...)` works from any scene: it shows the collection's scene for
 the export and goes back, and nothing of another scene goes out. `budgets` names the images the game would
 shrink (`shrunk`). `help(jfg64)` lists them with the spaces and units each one takes; `export` returns
 what it wrote (path, objects, triangles). `jfg64.__version__` says which version is loaded: after updating the
