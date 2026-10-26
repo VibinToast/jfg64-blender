@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.4"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.5"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 4),
+    "version": (0, 5, 5),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -778,15 +778,26 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
         sl = own(ln)
         wall_h = hh if kind != "canyon" else max(hh, 400)
         lefts, rights = [ca[0][0]], [ca[1][0]]
+        dirs = []
         for j in range(1, len(inner) - 1):
             p0, p1 = inner[j - 1], inner[j + 1]
             d = (p1[0] - p0[0], p1[1] - p0[1])
             dl = math.hypot(*d) or 1
             side = (-d[1] / dl, d[0] / dl)
-            lefts.append((inner[j][0] + side[0] * w, inner[j][1] + side[1] * w))
-            rights.append((inner[j][0] - side[0] * w, inner[j][1] - side[1] * w))
-        lefts.append(cc[1][0])
-        rights.append(cc[0][0])
+            lft = (inner[j][0] + side[0] * w, inner[j][1] + side[1] * w)
+            rgt = (inner[j][0] - side[0] * w, inner[j][1] - side[1] * w)
+            if not (_ahead(lefts[-1], lft, d) and _ahead(rights[-1], rgt, d)):
+                continue  # behind a slanted doorway's corner: the floor would fold over (a trial's did)
+            lefts.append(lft)
+            rights.append(rgt)
+            dirs.append(d)
+        end = (cc[1][0], cc[0][0])
+        while dirs and not (_ahead(lefts[-1], end[0], dirs[-1]) and _ahead(rights[-1], end[1], dirs[-1])):
+            lefts.pop()  # past the far doorway's corner: the same fold at the other end
+            rights.pop()
+            dirs.pop()
+        lefts.append(end[0])
+        rights.append(end[1])
         dist = [0.0]
         for j in range(1, len(lefts)):
             m0 = ((lefts[j - 1][0] + rights[j - 1][0]) / 2, (lefts[j - 1][1] + rights[j - 1][1]) / 2)
@@ -897,6 +908,11 @@ def door_spots(obj):
         out.append({"link": dr["link"], "end": dr["end"], "pos": [round(x), round(z), round(-y)],
                     "facing": round(math.degrees(math.atan2(-gx, -gz)) % 360, 1), "opening": dr["opening"]})
     return out
+
+
+def _ahead(a, b, d, gap=5.0):
+    """Point b is more than `gap` further than a along direction d (a passage side running on, not folding back)."""
+    return (b[0] - a[0]) * d[0] + (b[1] - a[1]) * d[1] > gap * math.hypot(*d)
 
 
 def _inside_poly(poly, p):
