@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.1"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.2"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 1),
+    "version": (0, 5, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -476,8 +476,14 @@ def rock(name="rock", radius=60.0, seed=0, roughness=0.35, squash=0.7, location=
          collection=None, sink=0.25, detail=1):
     """A lumpy boulder (an icosphere pushed about by noise), squashed to `squash` of its width and sunk `sink` of
     its height into the ground at `location`: cover squads take, a landmark, a step to jump from. Its
-    location's z is the ground there (ground_height). detail: icosphere subdivisions (1: 80 triangles, 2: 320;
-    keep it low, a level's whole budget is about 3,000)."""
+    location's z is the ground there (ground_height; under a roof pass its `below`). Its bottom is cut flat half
+    its height under the ground, so no triangles are spent deep under the floor. detail: icosphere subdivisions
+    (1: 80 triangles, 2: 320; keep it low, a level's whole budget is about 3,000). As cover for a squad it must be
+    one the player can't see over: radius 90 or more with squash 1.0-1.4 (about 100 tall); the guide's smaller
+    rocks are landmarks and steps."""
+    if any(c is None for c in location):
+        raise ValueError(f"rock {name!r}: its location {tuple(location)} has no height (ground_height found no "
+                         "ground there: off the mesh's edge?)")
     import bmesh
     import numpy as np
     bm = bmesh.new()
@@ -489,6 +495,7 @@ def rock(name="rock", radius=60.0, seed=0, roughness=0.35, squash=0.7, location=
         v.co *= radius * (1 + roughness * k)
         v.co.z *= squash
         v.co.z -= radius * squash * sink
+        v.co.z = max(v.co.z, -radius * squash * 0.5)  # the hidden bottom, cut flat
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
@@ -508,13 +515,15 @@ def rock(name="rock", radius=60.0, seed=0, roughness=0.35, squash=0.7, location=
     return obj
 
 
-def ground_height(obj, x, y):
-    """The z of mesh `obj`'s surface under (x, y) in world space (the highest), or None off its edge."""
+def ground_height(obj, x, y, below=None):
+    """The z of mesh `obj`'s surface under (x, y) in world space, or None off its edge. That's the highest surface
+    there: under a room's roof it's the roof's top. Pass `below` (a z between the floor and the ceiling, such as
+    the room's floor + 100) to get the floor under it instead."""
     from mathutils.bvhtree import BVHTree
     depsgraph = bpy.context.evaluated_depsgraph_get()
     tree = BVHTree.FromObject(obj, depsgraph)
     inv = obj.matrix_world.inverted()
-    origin = inv @ Vector((x, y, 1e6))
+    origin = inv @ Vector((x, y, 1e6 if below is None else below))
     hit = tree.ray_cast(origin, (inv.to_3x3() @ Vector((0, 0, -1))).normalized())
     return (obj.matrix_world @ hit[0]).z if hit[0] is not None else None
 
@@ -645,8 +654,9 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     ceiling (caves and indoor rooms; default False)}].
     links: [{"from": room, "to": room, "width" (default 200), "height" (default 300), "kind": "tunnel" (a roofed
     hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
-    "wiggle": how far it wanders between bends (0-1)}]. A link's floor slopes from one room's floor to the other's:
-    keep it under 45 degrees (layout_report says). A room or link may have its own "materials" ({"floor", "wall",
+    "wiggle": how far it wanders between bends (0-1), "landing": level floor this long at each end before the slope
+    (default 0; 160 for a door in the link: a door needs level floor, Studio's check says "on a slope")}]. A link's
+    floor slopes from one room's floor to the other's: keep it under 45 degrees (layout_report says). A room or link may have its own "materials" ({"floor", "wall",
     "ceiling"}: an open yard's grass among cave rooms). Each link cuts a doorway in both rooms' walls, with a lintel
     over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). boundary: the walls of rooms and
     links open to the sky go on up this far as invisible colliders, so the jetpack can't lift the player out (0:
@@ -775,7 +785,18 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
             m1 = ((lefts[j][0] + rights[j][0]) / 2, (lefts[j][1] + rights[j][1]) / 2)
             dist.append(dist[-1] + math.hypot(m1[0] - m0[0], m1[1] - m0[1]))
         total = dist[-1] or 1
-        zs = [za + (zc - za) * (d / total) for d in dist]
+        land = min(float(ln.get("landing", 0)), total / 3)
+        if land > 0:  # level floor this long at each end: cut the run there so the slope starts exactly at it
+            for at in (land, total - land):
+                j = next((j for j in range(1, len(dist)) if dist[j - 1] < at < dist[j]), None)
+                if j is None:
+                    continue
+                f = (at - dist[j - 1]) / (dist[j] - dist[j - 1])
+                lefts.insert(j, tuple(a0 + (a1 - a0) * f for a0, a1 in zip(lefts[j - 1], lefts[j])))
+                rights.insert(j, tuple(a0 + (a1 - a0) * f for a0, a1 in zip(rights[j - 1], rights[j])))
+                dist.insert(j, at)
+        zs = [za if d <= land else zc if d >= total - land else
+              za + (zc - za) * ((d - land) / (total - 2 * land)) for d in dist]
         for j in range(len(lefts) - 1):
             l0, l1, r0, r1 = lefts[j], lefts[j + 1], rights[j], rights[j + 1]
             z0, z1 = zs[j], zs[j + 1]
@@ -851,7 +872,8 @@ def _between(v, f1, f2, n):
 
 def layout_report(obj):
     """terrain_report for a layout, plus "steepest_floor": the steepest floor in degrees (links slope between
-    rooms; keep it under WALKABLE)."""
+    rooms; keep it under WALKABLE). Its "steepest" counts every face, walls and ceilings too (90 and 180), so
+    look at "steepest_floor" for the floors."""
     rep = terrain_report(obj)
     steep = 0.0
     nm = obj.matrix_world.to_3x3().inverted_safe().transposed()
@@ -987,7 +1009,10 @@ def _split_at_repeats(poly, axis):
             for i, a in enumerate(pc):
                 b = pc[(i + 1) % len(pc)]
                 da, db = a[1][axis] - k, b[1][axis] - k
-                (below if da <= 0 else above).append(a)
+                if da <= 0:
+                    below.append(a)
+                if da >= 0:  # a corner on the line belongs to both pieces (a rock's top on uv 0 lost a piece: a hole)
+                    above.append(a)
                 if (da < -1e-6 < 1e-6 < db) or (db < -1e-6 < 1e-6 < da):
                     f = da / (da - db)
                     mid = (tuple(a[0][j] + (b[0][j] - a[0][j]) * f for j in range(3)),
