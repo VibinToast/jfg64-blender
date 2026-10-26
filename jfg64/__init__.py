@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.3"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.4"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 3),
+    "version": (0, 5, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -245,10 +245,12 @@ def _library_index(folder):
     return _index_cache["textures"]
 
 
-def game_textures(words=None, level=None, size=None, limit=None, scene=None):
+def game_textures(words=None, level=None, size=None, limit=None, scene=None, repeats=None):
     """The game's level textures, filtered: words (all of them: a colour such as "green", "brown", "grey", and
-    "dark" / "mid" / "bright" / "vivid"), level (a game level id that uses it), size ((width, height)). Each is
-    {"id", "width", "height", "alpha", "words", "levels", "path"}; JFG-Studio's game_textures tool shows them."""
+    "dark" / "mid" / "bright" / "vivid"), level (a game level id that uses it), size ((width, height)), repeats
+    ("both": only those that tile both ways; most of the game's don't, and export cuts faces using those at every
+    repeat, which costs triangles). Each is {"id", "width", "height", "alpha", "words", "levels", "repeat" ([across,
+    up]), "path"}; JFG-Studio's game_textures tool shows them."""
     folder = library_folder(scene)
     if folder is None:
         raise RuntimeError("no game-texture library yet: JFG-Studio builds it from your ROM (open a project, or run "
@@ -260,8 +262,11 @@ def game_textures(words=None, level=None, size=None, limit=None, scene=None):
             continue
         if size is not None and (t["width"], t["height"]) != tuple(size):
             continue
+        rep = list(t.get("repeat", [True, True]))
+        if repeats == "both" and not all(rep):
+            continue
         out.append({"id": t["id"], "width": t["width"], "height": t["height"], "alpha": t["alpha"],
-                    "words": t["words"], "levels": t["levels"], "path": os.path.join(folder, t["file"])})
+                    "words": t["words"], "levels": t["levels"], "repeat": rep, "path": os.path.join(folder, t["file"])})
         if limit and len(out) >= limit:
             break
     return out
@@ -964,17 +969,20 @@ def _is_game_image(image):
 
 
 def budgets(objects):
-    """What the game's importer will count: {"triangles", "images" (new images, each a new texture of the game's),
+    """What the game's importer will count: {"triangles" (as exported: faces with a texture that doesn't repeat
+    are cut at each repeat), "modelled" (before those cuts), "images" (new images, each a new texture of the game's),
     "game" (game textures used, which the pack names by number and doesn't carry),
     "shrunk" (images the game will shrink: over IMAGE_PIXELS pixels or sides not a power of two), "far" (the farthest
     vertex coordinate from the origin, at most VERTEX_MAX), "surfaces" (kinds in use)}."""
-    tris, images, far, shrunk, game = 0, set(), 0.0, set(), set()
+    tris, cut, images, far, shrunk, game = 0, 0, set(), 0.0, set(), set()
     surfaces = set()
     for o in objects:
         if o.type != "MESH":
             continue
         m = o.data
-        tris += sum(len(p.vertices) - 2 for p in m.polygons)
+        modelled = sum(len(p.vertices) - 2 for p in m.polygons)
+        tris += modelled
+        cut += _cut_triangles(o) - modelled if any(any(_clamped_axes(s.material)) for s in o.material_slots) else 0
         for v in m.vertices:
             w = o.matrix_world @ v.co
             far = max(far, abs(w.x), abs(w.y), abs(w.z))
@@ -992,8 +1000,29 @@ def budgets(objects):
                         w, h = node.image.size
                         if w * h > IMAGE_PIXELS or w & (w - 1) or h & (h - 1):
                             shrunk.add(node.image.name)
-    return {"triangles": tris, "images": len(images), "game": len(game), "shrunk": sorted(shrunk), "far": far,
-            "surfaces": sorted(surfaces)}
+    return {"triangles": tris + cut, "modelled": tris, "images": len(images), "game": len(game),
+            "shrunk": sorted(shrunk), "far": far, "surfaces": sorted(surfaces)}
+
+
+def _cut_triangles(obj):
+    """The triangles mesh object `obj` exports as: its faces with a texture that doesn't repeat cut as _tiled_copy
+    cuts them."""
+    clamps = [_clamped_axes(s.material) for s in obj.material_slots] or [(False, False)]
+    m = obj.data
+    m.calc_loop_triangles()
+    uv = m.uv_layers.active
+    n = 0
+    for tri in m.loop_triangles:
+        cl = clamps[tri.material_index] if tri.material_index < len(clamps) else (False, False)
+        if not any(cl) or uv is None:
+            n += 1
+            continue
+        pieces = [[((0.0, 0.0, 0.0), tuple(uv.data[li].uv), (1.0, 1.0, 1.0, 1.0)) for li in tri.loops]]
+        for axis in (0, 1):
+            if cl[axis]:
+                pieces = [q for pc in pieces for q in _split_at_repeats(pc, axis)]
+        n += sum(len(pc) - 2 for pc in pieces)
+    return n
 
 
 def add_marker(context, kind, name=None):
