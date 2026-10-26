@@ -33,7 +33,8 @@ use the release zip.
   attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way, and
   the game draws only these colours, not a material's colour: tick **Tint by material** to bake each face's
   material colour (its Base Color) in.
-- **Budgets**: triangles, images (about three new ones fit the game's texture table), the farthest vertex (the game
+- **Budgets**: triangles, images (each becomes a new texture of the game's, at most 2048 pixels: 64 x 32 ...; bigger
+  ones are shrunk), the farthest vertex (the game
   takes up to 32767 units from the origin) and the surfaces in use.
 - **Markers**: empties at the 3D cursor that Studio turns into objects when it makes a level from the file:
   Startpoint (its arrow is the facing), Exit, Health, Regionpoint, or Other (set Type to any `stock:objtype/0x..`).

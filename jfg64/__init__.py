@@ -36,12 +36,12 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.3.1"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.3.2"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 3, 1),
+    "version": (0, 3, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, vertex light, budgets and markers for JFG-Studio levels",
@@ -67,7 +67,7 @@ SURFACES = {
 TRIANGLE_FLAGS = {"nocollide": 0x80, "ledge": 0x02, "ledgewall": 0x01}
 WORDS = {"water", "lava", "damage", "kill", "collider", "hidden", "nocollide", "ledge", "ledgewall"}
 VERTEX_MAX = 32767
-NEW_IMAGES_ROOM = 3  # the game's 3D texture table has room for about three new images
+IMAGE_PIXELS = 2048  # a new image is stored as one 16-bit texture of at most 4 KB: bigger ones are shrunk
 
 # Marker types: (Studio object type, default fields, empty display, size)
 MARKERS = {
@@ -202,7 +202,7 @@ class JFG_OT_bake(bpy.types.Operator):
 
 
 def budgets(objects):
-    """What the game's importer will count: {"triangles", "images" (new images: about NEW_IMAGES_ROOM fit), "far"
+    """What the game's importer will count: {"triangles", "images" (new images, each a new texture of the game's), "far"
     (the farthest vertex coordinate from the origin, at most VERTEX_MAX), "surfaces" (kinds in use)}."""
     tris, images, far = 0, set(), 0.0
     surfaces = set()
@@ -358,8 +358,7 @@ class JFG_PT_panel(bpy.types.Panel):
         b = budgets(context.visible_objects)
         box.label(text=f"{b['triangles']} triangles")
         row = box.row()
-        row.alert = b["images"] > NEW_IMAGES_ROOM
-        row.label(text=f"{b['images']} images (about {NEW_IMAGES_ROOM} new fit)")
+        row.label(text=f"{b['images']} images (each at most {IMAGE_PIXELS} pixels in the game)")
         row = box.row()
         row.alert = b["far"] > VERTEX_MAX
         row.label(text=f"farthest vertex {b['far']:.0f} (limit {VERTEX_MAX})")
