@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.4.1"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.4.2"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 4, 1),
+    "version": (0, 4, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -347,9 +347,20 @@ def _smoothstep(t):
     return t * t * (3 - 2 * t)
 
 
+def boundary_material():
+    """The invisible, solid material that keeps players inside a level (a Collider surface, made once)."""
+    mat = bpy.data.materials.get("level_edge_collider")
+    if mat is None:
+        mat = bpy.data.materials.new("level_edge")
+        mat.diffuse_color = (1.0, 0.3, 0.8, 0.25)
+        set_surface(mat, "collider")
+    return mat
+
+
 def terrain(name="terrain", size=(2000.0, 2000.0), step=50.0, height=150.0, scale=700.0, octaves=4, seed=0,
             style="hills", flat=(), paths=(), path_width=120.0, path_depth=0.0, rim=0.0, rim_width=300.0,
-            max_slope=40.0, uv_size=256.0, material=None, location=(0.0, 0.0, 0.0), collection=None):
+            max_slope=40.0, uv_size=256.0, material=None, location=(0.0, 0.0, 0.0), collection=None,
+            boundary=800.0):
     """A ground mesh shaped by noise instead of boxes, for levels that feel like places.
 
     size (x, y) and step: the grid (keep step 40-80: every grid square is two triangles of the game's budget).
@@ -359,7 +370,9 @@ def terrain(name="terrain", size=(2000.0, 2000.0), step=50.0, height=150.0, scal
     paths: lines [[(x, y), ...], ...] smoothed into walkable tracks path_width wide (path_depth sinks them, a gully);
     rim: hills this high round the edge (rim_width deep), so the level ends in slopes instead of walls; slopes
     steeper than max_slope (degrees, below WALKABLE) are relaxed, except in the rim. UVs repeat every uv_size units
-    (game textures are small and tile). Returns the object; terrain_report(obj) says how walkable it is."""
+    (game textures are small and tile). boundary: an invisible wall (a Collider surface) this high round the edge,
+    so the player never leaves the level (0: none, when the level is meant to have a drop: then put a kill floor
+    below it). Returns the object; terrain_report(obj) says how walkable it is."""
     import numpy as np
     sx, sy = float(size[0]), float(size[1])
     nx, ny = max(2, int(round(sx / step)) + 1), max(2, int(round(sy / step)) + 1)
@@ -367,6 +380,7 @@ def terrain(name="terrain", size=(2000.0, 2000.0), step=50.0, height=150.0, scal
     gx, gy = np.meshgrid(xs, ys)
     h = _fbm(gx / scale, gy / scale, seed, octaves, style) * height * 2.2  # noise rarely reaches 1: about +-height
     gentle = _fbm(gx / (scale * 2.5), gy / (scale * 2.5), seed + 7, 2) * height * 0.3
+    keep = np.zeros_like(h)  # how much each spot belongs to a path or clearing: the rim leaves those level
     for line in paths:
         pts = [(float(p[0]), float(p[1])) for p in line]
         dist = np.full(gx.shape, np.inf)
@@ -376,21 +390,24 @@ def terrain(name="terrain", size=(2000.0, 2000.0), step=50.0, height=150.0, scal
             dist = np.minimum(dist, np.hypot(gx - ax - t * dx, gy - ay - t * dy))
         w = 1 - _smoothstep((dist - path_width / 2) / path_width)
         h = h * (1 - w) + (gentle - path_depth) * w
+        keep = np.maximum(keep, w)
     for c in flat:
         cx, cy, r = float(c[0]), float(c[1]), float(c[2])
         level = float(c[3]) if len(c) > 3 else float(_fbm(np.array(cx / scale), np.array(cy / scale), seed,
                                                            octaves, style) * height)
         w = 1 - _smoothstep((np.hypot(gx - cx, gy - cy) - r) / (r * 0.6 + step))
         h = h * (1 - w) + level * w
+        keep = np.maximum(keep, w)
     edge = np.minimum(np.minimum(gx + sx / 2, sx / 2 - gx), np.minimum(gy + sy / 2, sy / 2 - gy))
     wobble = _perlin(gx / (rim_width * 1.5), gy / (rim_width * 1.5), seed + 13)  # the rim winds, not a box
     rim_w = _smoothstep(1 - (edge + wobble * rim_width * 0.45) / max(rim_width, 1e-9)) if rim else np.zeros_like(h)
+    rim_w = rim_w * (1 - keep)  # clearings and paths near the edge stay level
     limit = math.tan(math.radians(min(max_slope, WALKABLE))) * step
     for _ in range(60):  # relax slopes steeper than max_slope (not in the rim, where steep is the point)
         hp = np.pad(h, 1, mode="edge")
         nb = (hp[:-2, 1:-1] + hp[2:, 1:-1] + hp[1:-1, :-2] + hp[1:-1, 2:]) / 4
         steep = (np.maximum.reduce([abs(hp[:-2, 1:-1] - h), abs(hp[2:, 1:-1] - h), abs(hp[1:-1, :-2] - h),
-                                    abs(hp[1:-1, 2:] - h)]) > limit) & (rim_w < 0.05)
+                                    abs(hp[1:-1, 2:] - h)]) > limit) & (rim_w < 0.05) & (keep < 0.95)
         if not steep.any():
             break
         h = np.where(steep, h * 0.5 + nb * 0.5, h)
@@ -398,19 +415,36 @@ def terrain(name="terrain", size=(2000.0, 2000.0), step=50.0, height=150.0, scal
     verts = [(float(gx[j, i]), float(gy[j, i]), float(h[j, i])) for j in range(ny) for i in range(nx)]
     faces = [(j * nx + i, j * nx + i + 1, (j + 1) * nx + i + 1, (j + 1) * nx + i)
              for j in range(ny - 1) for i in range(nx - 1)]
+    edge_faces = []
+    if boundary:
+        ring = ([j * nx for j in range(ny)] + [(ny - 1) * nx + i for i in range(1, nx)]
+                + [j * nx + nx - 1 for j in range(ny - 2, -1, -1)] + [i for i in range(nx - 2, 0, -1)])
+        top = float(h.max()) + boundary
+        base = len(verts)
+        for k in ring:
+            x, y, z = verts[k]
+            verts.append((x, y, z - 50))
+            verts.append((x, y, top))
+        m = len(ring)
+        for k in range(m):
+            a, b = base + 2 * k, base + 2 * ((k + 1) % m)
+            edge_faces.append((a, a + 1, b + 1, b))
     mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata(verts, [], faces)
+    mesh.from_pydata(verts, [], faces + edge_faces)
     uv = mesh.uv_layers.new(name="UV")
     for poly in mesh.polygons:
         for li in poly.loop_indices:
             co = verts[mesh.loops[li].vertex_index]
             uv.data[li].uv = (co[0] / uv_size, co[1] / uv_size)
+    mesh.materials.append(material)
+    if edge_faces:
+        mesh.materials.append(boundary_material())
+        for poly in mesh.polygons[len(faces):]:
+            poly.material_index = 1
     mesh.update()
     obj = bpy.data.objects.new(name, mesh)
     obj.location = location
     (collection or bpy.context.scene.collection).objects.link(obj)
-    if material is not None:
-        mesh.materials.append(material)
     obj["jfg_terrain"] = json.dumps({"seed": seed, "style": style, "step": step, "height": height, "scale": scale})
     return obj
 
@@ -594,7 +628,7 @@ class _Builder:
         return obj
 
 
-def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, collection=None):
+def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, collection=None, boundary=1200.0):
     """A level laid out as the game's are: rooms of their own shapes joined by tunnels, corridors and canyons,
     instead of one big box. The defaults are the game's own (JFG-Studio's study of its levels): passages about
     200 wide (150-300) with about 300 clearance in tunnels, rooms about 600-800 high.
@@ -606,13 +640,18 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
     "wiggle": how far it wanders between bends (0-1)}]. A link's floor slopes from one room's floor to the other's:
     keep it under 45 degrees (layout_report says). Each link cuts a doorway in both rooms' walls, with a lintel
-    over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). Returns the object."""
+    over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). boundary: the walls of rooms and
+    links open to the sky go on up this far as invisible colliders, so the jetpack can't lift the player out (0:
+    none). Returns the object."""
     import numpy as np
     by_name = {r["name"]: r for r in rooms}
     b = _Builder()
     mats = [m for m in (floor, wall, ceiling) if m is not None]
     slot = {k: (mats.index(m) if m is not None else 0) for k, m in (("floor", floor), ("wall", wall),
                                                                     ("ceiling", ceiling))}
+    if boundary:
+        mats.append(boundary_material())
+        slot["edge"] = len(mats) - 1
     outlines = {r["name"]: _room_outline(r, seed + i * 17) for i, r in enumerate(rooms)}
     mouths = {r["name"]: [] for r in rooms}  # (index of the outline edge it opens, its two corners, link)
     paths = []
@@ -685,6 +724,8 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
             gap = gaps.get(i)
             if gap is None:
                 run = b.wall(a2, b2, z, z, z + h, z + h, (cx, cy), slot["wall"], run)
+                if boundary and not r.get("roof"):
+                    b.wall(a2, b2, z + h, z + h, z + h + boundary, z + h + boundary, (cx, cy), slot["edge"])
             elif gap.get("kind", "tunnel") == "tunnel" and gap.get("height", 300) < h:
                 top = z + gap.get("height", 300)
                 run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), slot["wall"], run)  # the lintel
@@ -722,6 +763,10 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
                                    (r1[0] / 256, r1[1] / 256), (l1[0] / 256, l1[1] / 256)])
             b.wall(l0, l1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
             b.wall(r0, r1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
+            if boundary and kind != "tunnel":
+                top0, top1 = z0 + wall_h + boundary, z1 + wall_h + boundary
+                b.wall(l0, l1, z0 + wall_h, z1 + wall_h, top0, top1, mid, slot["edge"])
+                b.wall(r0, r1, z0 + wall_h, z1 + wall_h, top0, top1, mid, slot["edge"])
             if kind == "tunnel":
                 b.face([(l0[0], l0[1], z0 + hh), (r0[0], r0[1], z0 + hh), (r1[0], r1[1], z1 + hh),
                         (l1[0], l1[1], z1 + hh)], (0, 0, -1), slot["ceiling"],
