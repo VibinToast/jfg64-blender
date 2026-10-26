@@ -49,7 +49,9 @@ Then in JFG-Studio: **File › New project…** with the `.glb` as Geometry, or 
 Everything the panel does is also a function, for scripts and AI agents (through a Blender MCP server):
 `set_surface(material, kind)`, `bake_light(mesh, matrix_world, sun_dir, sun_colour, ambient, tint=False)`,
 `bake_scene(objects, tint=None)`, `budgets(objects)`, `export(path, objects=None, collection=None)` and
-`add_marker(context, kind)`. `help(jfg64)` lists them with the spaces and units each one takes; `export` returns
+`add_marker(context, kind)`. `export(collection=...)` works from any scene: it shows the collection's scene for
+the export and goes back, and nothing of another scene goes out. `budgets` names the images the game would
+shrink (`shrunk`). `help(jfg64)` lists them with the spaces and units each one takes; `export` returns
 what it wrote (path, objects, triangles). `jfg64.__version__` says which version is loaded: after updating the
 add-on, restart Blender, as a running Blender keeps the version it started with.
 

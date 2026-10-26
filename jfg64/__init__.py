@@ -36,12 +36,12 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.3.2"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.3.3"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 3, 2),
+    "version": (0, 3, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, vertex light, budgets and markers for JFG-Studio levels",
@@ -202,9 +202,10 @@ class JFG_OT_bake(bpy.types.Operator):
 
 
 def budgets(objects):
-    """What the game's importer will count: {"triangles", "images" (new images, each a new texture of the game's), "far"
-    (the farthest vertex coordinate from the origin, at most VERTEX_MAX), "surfaces" (kinds in use)}."""
-    tris, images, far = 0, set(), 0.0
+    """What the game's importer will count: {"triangles", "images" (new images, each a new texture of the game's),
+    "shrunk" (images the game will shrink: over IMAGE_PIXELS pixels or sides not a power of two), "far" (the farthest
+    vertex coordinate from the origin, at most VERTEX_MAX), "surfaces" (kinds in use)}."""
+    tris, images, far, shrunk = 0, set(), 0.0, set()
     surfaces = set()
     for o in objects:
         if o.type != "MESH":
@@ -223,7 +224,11 @@ def budgets(objects):
                 for node in mat.node_tree.nodes:
                     if node.type == "TEX_IMAGE" and node.image:
                         images.add(node.image.name)
-    return {"triangles": tris, "images": len(images), "far": far, "surfaces": sorted(surfaces)}
+                        w, h = node.image.size
+                        if w * h > IMAGE_PIXELS or w & (w - 1) or h & (h - 1):
+                            shrunk.add(node.image.name)
+    return {"triangles": tris, "images": len(images), "shrunk": sorted(shrunk), "far": far,
+            "surfaces": sorted(surfaces)}
 
 
 def add_marker(context, kind, name=None):
@@ -281,9 +286,23 @@ class JFG_OT_export(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _scene_of(objects, collection):
+    """The scene that holds what is exported: the collection's, else the objects' first scene."""
+    for scene in bpy.data.scenes:
+        if collection is not None and (collection == scene.collection
+                                       or collection in scene.collection.children_recursive):
+            return scene
+        if collection is None and objects and objects[0].name in scene.objects:
+            return scene
+    return bpy.context.scene
+
+
 def export(path, objects=None, collection=None):
-    """A .glb for Studio: the visible objects, or only `objects` / the objects of `collection` (a Collection or its
-    name; they must be in the view layer). The vertex colours are the "Col" layer bake_light writes."""
+    """A .glb for Studio: the visible objects of the window's scene, or only `objects` / the objects of `collection`
+    (a Collection or its name), from whichever scene holds them: the window shows that scene for the export and
+    goes back after. Only that scene's objects go out. The vertex colours are the "Col" layer bake_light writes.
+    Returns {"path", "objects", "triangles"} for what was written."""
+    coll = None
     if collection is not None:
         coll = bpy.data.collections[collection] if isinstance(collection, str) else collection
         objects = list(coll.all_objects)
@@ -294,20 +313,44 @@ def export(path, objects=None, collection=None):
     if objects is None:
         bpy.ops.export_scene.gltf(use_visible=True, **options)
         return _summary(path, bpy.context.visible_objects)
-    layer = bpy.context.view_layer
-    selected, active = [o for o in layer.objects if o.select_get()], layer.objects.active
+    objects = [o for o in objects if o is not None]
+    window = bpy.context.window
+    scene = _scene_of(objects, coll)
+    old_scene = window.scene if window else None
+    if scene != bpy.context.scene:
+        if window is None:
+            raise RuntimeError(f"the objects are in scene {scene.name!r}, not the current one, and there is no "
+                               "window to show it in: export from that scene")
+        window.scene = scene  # a plain switch (a context override of the scene can crash Blender)
     try:
-        for o in selected:
-            o.select_set(False)
-        for o in objects:
-            o.select_set(True)
-        bpy.ops.export_scene.gltf(use_selection=True, **options)
+        layer = bpy.context.view_layer
+        layer.update()  # newly linked objects in, removed ones out
+        here = {o.name for o in layer.objects}
+        objects = [o for o in objects if o.name in here]  # objects removed or excluded from the view layer: left out
+        selected = [o for o in layer.objects if o.select_get()]
+        active = layer.objects.active
+        # The exporter takes the selected objects of every scene: other scenes' selections are put aside too.
+        elsewhere = [(o, vl) for sc in bpy.data.scenes if sc != scene for vl in sc.view_layers
+                     for o in vl.objects if o.select_get(view_layer=vl)]
+        try:
+            for o, vl in elsewhere:
+                o.select_set(False, view_layer=vl)
+            for o in selected:
+                o.select_set(False)
+            for o in objects:
+                o.select_set(True)
+            bpy.ops.export_scene.gltf(use_selection=True, **options)
+        finally:
+            for o in objects:
+                o.select_set(False)
+            for o in selected:
+                o.select_set(True)
+            for o, vl in elsewhere:
+                o.select_set(True, view_layer=vl)
+            layer.objects.active = active
     finally:
-        for o in objects:
-            o.select_set(False)
-        for o in selected:
-            o.select_set(True)
-        layer.objects.active = active
+        if old_scene is not None and window.scene != old_scene:
+            window.scene = old_scene
     return _summary(path, objects)
 
 
@@ -358,7 +401,9 @@ class JFG_PT_panel(bpy.types.Panel):
         b = budgets(context.visible_objects)
         box.label(text=f"{b['triangles']} triangles")
         row = box.row()
-        row.label(text=f"{b['images']} images (each at most {IMAGE_PIXELS} pixels in the game)")
+        row.alert = bool(b["shrunk"])
+        row.label(text=f"{b['images']} images" + (f", {len(b['shrunk'])} to be shrunk" if b["shrunk"] else
+                                                  f" (each at most {IMAGE_PIXELS} pixels in the game)"))
         row = box.row()
         row.alert = b["far"] > VERTEX_MAX
         row.label(text=f"farthest vertex {b['far']:.0f} (limit {VERTEX_MAX})")
