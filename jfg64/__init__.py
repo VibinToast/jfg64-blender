@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.2"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.3"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 2),
+    "version": (0, 5, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -655,7 +655,9 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     links: [{"from": room, "to": room, "width" (default 200), "height" (default 300), "kind": "tunnel" (a roofed
     hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
     "wiggle": how far it wanders between bends (0-1), "landing": level floor this long at each end before the slope
-    (default 0; 160 for a door in the link: a door needs level floor, Studio's check says "on a slope")}]. A link's
+    (default 0), "door": "from" | "to" | "both" (or {"end", "width", "height"}): a doorway frame on a level landing
+    at that end, narrower and lower than the game's doors so a door hides its edges behind it (door_spots says where
+    each door goes)}]. A link's
     floor slopes from one room's floor to the other's: keep it under 45 degrees (layout_report says). A room or link may have its own "materials" ({"floor", "wall",
     "ceiling"}: an open yard's grass among cave rooms). Each link cuts a doorway in both rooms' walls, with a lintel
     over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). boundary: the walls of rooms and
@@ -761,6 +763,7 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
                 top = z + gap.get("height", 300)
                 run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), sl["wall"], run)  # the lintel
     # links: floor, walls, roof along the axis, from one room's doorway to the other's
+    doors = []
     for ln, axis, ends in paths:
         (ra, ca, ia), (rc, cc, ic) = ends
         inner = axis[ia - 1: len(axis) - ic + 1]
@@ -785,7 +788,8 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
             m1 = ((lefts[j][0] + rights[j][0]) / 2, (lefts[j][1] + rights[j][1]) / 2)
             dist.append(dist[-1] + math.hypot(m1[0] - m0[0], m1[1] - m0[1]))
         total = dist[-1] or 1
-        land = min(float(ln.get("landing", 0)), total / 3)
+        door = ln.get("door")
+        land = min(float(ln.get("landing", DOOR_LANDING if door else 0)), total / 3)
         if land > 0:  # level floor this long at each end: cut the run there so the slope starts exactly at it
             for at in (land, total - land):
                 j = next((j for j in range(1, len(dist)) if dist[j - 1] < at < dist[j]), None)
@@ -815,9 +819,79 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
                         (l1[0], l1[1], z1 + hh)], (0, 0, -1), sl["ceiling"],
                        [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256), (r1[0] / 256, r1[1] / 256),
                         (l1[0] / 256, l1[1] / 256)])
+        if door:  # a doorway frame in the middle of the landing at the door's end (or both)
+            spec = door if isinstance(door, dict) else {"end": door}
+            ends = ("from", "to") if spec.get("end", "from") == "both" else (spec.get("end", "from"),)
+            mids = [((lf[0] + rt[0]) / 2, (lf[1] + rt[1]) / 2) for lf, rt in zip(lefts, rights)]
+            for end in ends:
+                at = land / 2 if end == "from" else total - land / 2
+                j = next((j for j in range(1, len(dist)) if dist[j] >= at), len(dist) - 1)
+                f = (at - dist[j - 1]) / ((dist[j] - dist[j - 1]) or 1)
+                c = (mids[j - 1][0] + (mids[j][0] - mids[j - 1][0]) * f, mids[j - 1][1] + (mids[j][1] - mids[j - 1][1]) * f)
+                d = (mids[j][0] - mids[j - 1][0], mids[j][1] - mids[j - 1][1])
+                dl = math.hypot(*d) or 1
+                d = (d[0] / dl, d[1] / dl)
+                z = za if end == "from" else zc
+                opening = (min(spec.get("width", DOOR_OPENING[0]), 2 * w - 20), min(spec.get("height", DOOR_OPENING[1]), hh - 10))
+                _frame(b, c, d, z, w, wall_h, opening, sl["wall"], top=kind != "tunnel")
+                doors.append({"link": f"{ln['from']}-{ln['to']}", "end": end, "at": [c[0], c[1], z], "dir": list(d),
+                              "opening": list(opening)})
     obj = b.build(name, mats or [None], collection)
     obj["jfg_layout"] = json.dumps({"rooms": rooms, "links": links, "seed": seed}, default=str)
+    obj["jfg_doors"] = json.dumps(doors)
     return obj
+
+
+DOOR_LANDING = 160  # level floor before a link's slope, for a door
+DOOR_OPENING = (160, 180)  # a doorway the game's 198 x 199 doors overlap, as its own levels fit them (most 150-200
+                           # wide and 160-220 high round that door: the door covers the frame's edges, no seam shows)
+DOOR_DEPTH = 30
+
+
+def _frame(b, c, d, z, w, h, opening, mat, top=False):
+    """A doorway frame across a passage: at c (x, y) on floor z, the passage running along d (unit), w half its width
+    and h its walls' height; the opening (width, height) in the middle. Its faces facing into the passage only."""
+    s = (-d[1], d[0])
+    ow, oh, dep = opening[0] / 2, opening[1], DOOR_DEPTH / 2
+
+    def p(u, v, hgt):
+        return (c[0] + s[0] * u + d[0] * v, c[1] + s[1] * u + d[1] * v, z + hgt)
+
+    def quad(corners, want, uvs):
+        b.face(corners, want, mat, [(a / UV_SIZE, bb / UV_SIZE) for a, bb in uvs])
+
+    for sgn in (1, -1):  # the two jambs
+        u0, u1 = sgn * ow, sgn * w
+        for v in (-dep, dep):  # front and back
+            quad([p(u0, v, 0), p(u1, v, 0), p(u1, v, h), p(u0, v, h)], (d[0] * v, d[1] * v, 0),
+                 [(u0, 0), (u1, 0), (u1, h), (u0, h)])
+        quad([p(u0, -dep, 0), p(u0, dep, 0), p(u0, dep, h), p(u0, -dep, h)], (-s[0] * sgn, -s[1] * sgn, 0),
+             [(-dep, 0), (dep, 0), (dep, h), (-dep, h)])  # the side of the opening
+        if top:
+            quad([p(u0, -dep, h), p(u1, -dep, h), p(u1, dep, h), p(u0, dep, h)], (0, 0, 1),
+                 [(u0, -dep), (u1, -dep), (u1, dep), (u0, dep)])
+    for v in (-dep, dep):  # the lintel
+        quad([p(-ow, v, oh), p(ow, v, oh), p(ow, v, h), p(-ow, v, h)], (d[0] * v, d[1] * v, 0),
+             [(-ow, oh), (ow, oh), (ow, h), (-ow, h)])
+    quad([p(-ow, -dep, oh), p(ow, -dep, oh), p(ow, dep, oh), p(-ow, dep, oh)], (0, 0, -1),
+         [(-ow, -dep), (ow, -dep), (ow, dep), (-ow, dep)])
+    if top:
+        quad([p(-ow, -dep, h), p(ow, -dep, h), p(ow, dep, h), p(-ow, dep, h)], (0, 0, 1),
+             [(-ow, -dep), (ow, -dep), (ow, dep), (-ow, dep)])
+
+
+def door_spots(obj):
+    """Where a layout's doors go, in the game's units for Studio: [{"link", "end", "pos": [x, y, z] (on the floor),
+    "facing": degrees for Studio's facing (along the passage), "opening": [width, height]}]. Place a door type
+    bigger than the opening there (the game's 198 x 199 doors fit the default 160 x 180), so its edges hide behind
+    the frame."""
+    out = []
+    for dr in json.loads(obj.get("jfg_doors", "[]")):
+        x, y, z = (obj.matrix_world @ Vector(dr["at"]))[:]
+        gx, gz = dr["dir"][0], -dr["dir"][1]  # the game's x, z (Blender y is the game's -z)
+        out.append({"link": dr["link"], "end": dr["end"], "pos": [round(x), round(z), round(-y)],
+                    "facing": round(math.degrees(math.atan2(-gx, -gz)) % 360, 1), "opening": dr["opening"]})
+    return out
 
 
 def _inside_poly(poly, p):
