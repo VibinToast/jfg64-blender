@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.4.2"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.4.3"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 4, 2),
+    "version": (0, 4, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -639,7 +639,8 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     links: [{"from": room, "to": room, "width" (default 200), "height" (default 300), "kind": "tunnel" (a roofed
     hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
     "wiggle": how far it wanders between bends (0-1)}]. A link's floor slopes from one room's floor to the other's:
-    keep it under 45 degrees (layout_report says). Each link cuts a doorway in both rooms' walls, with a lintel
+    keep it under 45 degrees (layout_report says). A room or link may have its own "materials" ({"floor", "wall",
+    "ceiling"}: an open yard's grass among cave rooms). Each link cuts a doorway in both rooms' walls, with a lintel
     over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). boundary: the walls of rooms and
     links open to the sky go on up this far as invisible colliders, so the jetpack can't lift the player out (0:
     none). Returns the object."""
@@ -652,6 +653,18 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     if boundary:
         mats.append(boundary_material())
         slot["edge"] = len(mats) - 1
+
+    def own(spec):
+        """The slots of a room or link: its own "materials" ({"floor", "wall", "ceiling"}) over the layout's."""
+        out = dict(slot)
+        for k, m in (spec.get("materials") or {}).items():
+            if m is None:
+                continue
+            if m not in mats:
+                mats.append(m)
+            out[k] = mats.index(m)
+        return out
+
     outlines = {r["name"]: _room_outline(r, seed + i * 17) for i, r in enumerate(rooms)}
     mouths = {r["name"]: [] for r in rooms}  # (index of the outline edge it opens, its two corners, link)
     paths = []
@@ -706,6 +719,7 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
         outline = list(outlines[r["name"]])
         z, h = r.get("floor", 0.0), r.get("height", 600.0)
         cx, cy = r["at"]
+        sl = own(r)
         cuts = []  # replace the outline between each mouth's corners by the two corners
         for corners, ln in mouths[r["name"]]:
             (p1, e1), (p2, e2) = corners
@@ -713,22 +727,22 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
         pts, gaps = _cut_outline(outline, cuts)
         for i in range(len(pts)):
             a2, b2 = pts[i], pts[(i + 1) % len(pts)]
-            b.face([(cx, cy, z), (a2[0], a2[1], z), (b2[0], b2[1], z)], (0, 0, 1), slot["floor"],
+            b.face([(cx, cy, z), (a2[0], a2[1], z), (b2[0], b2[1], z)], (0, 0, 1), sl["floor"],
                    [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
             if r.get("roof"):
                 b.face([(cx, cy, z + h), (a2[0], a2[1], z + h), (b2[0], b2[1], z + h)], (0, 0, -1),
-                       slot["ceiling"], [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+                       sl["ceiling"], [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
         run = 0.0
         for i in range(len(pts)):
             a2, b2 = pts[i], pts[(i + 1) % len(pts)]
             gap = gaps.get(i)
             if gap is None:
-                run = b.wall(a2, b2, z, z, z + h, z + h, (cx, cy), slot["wall"], run)
+                run = b.wall(a2, b2, z, z, z + h, z + h, (cx, cy), sl["wall"], run)
                 if boundary and not r.get("roof"):
                     b.wall(a2, b2, z + h, z + h, z + h + boundary, z + h + boundary, (cx, cy), slot["edge"])
             elif gap.get("kind", "tunnel") == "tunnel" and gap.get("height", 300) < h:
                 top = z + gap.get("height", 300)
-                run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), slot["wall"], run)  # the lintel
+                run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), sl["wall"], run)  # the lintel
     # links: floor, walls, roof along the axis, from one room's doorway to the other's
     for ln, axis, ends in paths:
         (ra, ca, ia), (rc, cc, ic) = ends
@@ -736,6 +750,7 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
         za, zc = ra.get("floor", 0.0), rc.get("floor", 0.0)
         w, hh = ln.get("width", 200) / 2, ln.get("height", 300)
         kind = ln.get("kind", "tunnel")
+        sl = own(ln)
         wall_h = hh if kind != "canyon" else max(hh, 400)
         lefts, rights = [ca[0][0]], [ca[1][0]]
         for j in range(1, len(inner) - 1):
@@ -759,17 +774,17 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
             z0, z1 = zs[j], zs[j + 1]
             mid = ((l0[0] + r0[0] + l1[0] + r1[0]) / 4, (l0[1] + r0[1] + l1[1] + r1[1]) / 4)
             b.face([(l0[0], l0[1], z0), (r0[0], r0[1], z0), (r1[0], r1[1], z1), (l1[0], l1[1], z1)], (0, 0, 1),
-                   slot["floor"], [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256),
+                   sl["floor"], [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256),
                                    (r1[0] / 256, r1[1] / 256), (l1[0] / 256, l1[1] / 256)])
-            b.wall(l0, l1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
-            b.wall(r0, r1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
+            b.wall(l0, l1, z0, z1, z0 + wall_h, z1 + wall_h, mid, sl["wall"], dist[j])
+            b.wall(r0, r1, z0, z1, z0 + wall_h, z1 + wall_h, mid, sl["wall"], dist[j])
             if boundary and kind != "tunnel":
                 top0, top1 = z0 + wall_h + boundary, z1 + wall_h + boundary
                 b.wall(l0, l1, z0 + wall_h, z1 + wall_h, top0, top1, mid, slot["edge"])
                 b.wall(r0, r1, z0 + wall_h, z1 + wall_h, top0, top1, mid, slot["edge"])
             if kind == "tunnel":
                 b.face([(l0[0], l0[1], z0 + hh), (r0[0], r0[1], z0 + hh), (r1[0], r1[1], z1 + hh),
-                        (l1[0], l1[1], z1 + hh)], (0, 0, -1), slot["ceiling"],
+                        (l1[0], l1[1], z1 + hh)], (0, 0, -1), sl["ceiling"],
                        [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256), (r1[0] / 256, r1[1] / 256),
                         (l1[0] / 256, l1[1] / 256)])
     obj = b.build(name, mats or [None], collection)
