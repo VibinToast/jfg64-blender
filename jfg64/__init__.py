@@ -12,7 +12,9 @@ In the 3D View's sidebar (N), tab "JFG":
 Studio checks every file with the game's own importer; this add-on only makes the common things quick.
 
 Scripting (an AI agent through a Blender MCP server, or any script): `import jfg64`, then
-- set_surface(material, kind): kind is one of SURFACES (solid, water, lava, kill, collider, nocollide);
+- set_surface(material, kind): kind is one of SURFACES (solid, water, lava, kill, collider, nocollide, and ledge /
+  ledgewall: a grabbable ledge is a "ledge" top whose edges meet "ledgewall" walls exactly, sharing the top's
+  corners);
 - bake_light(mesh, world_matrix, sun_dir, sun_colour, ambient, tint=False): one mesh; bake_scene(objects, tint=False):
   several, with the panel's settings and the scene's Sun lamp;
 - budgets(objects) -> {"triangles", "images", "far", "surfaces"};
@@ -50,8 +52,14 @@ SURFACES = {
     "kill": ("kill", 0x1008, "opaque", "OPAQUE"),
     "collider": ("collider", 0x1408, "opaque", "OPAQUE"),
     "nocollide": ("nocollide", 0x1008, "opaque", "OPAQUE"),
+    "ledge": ("ledge", 0x1008, "opaque", "OPAQUE"),
+    "ledgewall": ("ledgewall", 0x1008, "opaque", "OPAQUE"),
 }
-WORDS = {"water", "lava", "damage", "kill", "collider", "hidden", "nocollide"}
+# Triangle flags a surface sets (extras.triangleFlags): 0x80 no collision. A grabbable ledge (the decomp, port
+# request 10) is a top with 0x02 and the wall under each of its edges with 0x01, linked across the edge: the wall's
+# top on the top's own corners, both in one piece of the level.
+TRIANGLE_FLAGS = {"nocollide": 0x80, "ledge": 0x02, "ledgewall": 0x01}
+WORDS = {"water", "lava", "damage", "kill", "collider", "hidden", "nocollide", "ledge", "ledgewall"}
 VERTEX_MAX = 32767
 NEW_IMAGES_ROOM = 3  # the game's 3D texture table has room for about three new images
 
@@ -71,7 +79,7 @@ def _words(name):
 
 def surface_of(mat):
     words = _words(mat.name)
-    for key in ("water", "lava", "kill", "collider", "nocollide"):
+    for key in ("water", "lava", "kill", "collider", "nocollide", "ledgewall", "ledge"):
         if key in words:
             return key
     if "damage" in words:
@@ -92,8 +100,8 @@ def set_surface(mat, kind):
     mat["batchFlags"] = flags
     mat["pass"] = render_pass
     mat.blend_method = "BLEND" if blend == "BLEND" else "OPAQUE"
-    if kind == "nocollide":
-        mat["triangleFlags"] = 0x80
+    if kind in TRIANGLE_FLAGS:
+        mat["triangleFlags"] = TRIANGLE_FLAGS[kind]
     elif "triangleFlags" in mat:
         del mat["triangleFlags"]
 

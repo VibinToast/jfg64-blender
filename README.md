@@ -20,9 +20,12 @@ use the release zip.
 
 ## What it does
 
-- **Surface**: makes the active material Solid, Water, Lava, Kill (a pit floor), Collider (invisible but solid) or
-  Nocollide (drawn, not solid). It puts the word in the material's name and sets the custom properties (`batchFlags`,
-  `pass`) the game's track importer reads.
+- **Surface**: makes the active material Solid, Water, Lava, Kill (a pit floor), Collider (invisible but solid),
+  Nocollide (drawn, not solid), Ledge or Ledgewall. It puts the word in the material's name and sets the custom
+  properties (`batchFlags`, `pass`, `triangleFlags`) the game's track importer reads.
+- **Ledges**: the heroes grab an edge only where it is made a ledge: give a block's top the Ledge surface and its
+  walls Ledgewall, with the walls' top edges exactly on the top's corners. The hero catches the edge while falling
+  past it. Everything else has no ledges.
 - **Vertex light**: bakes a sun and an ambient colour into the selected meshes' vertex colours (a `Col` byte colour
   attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way, and
   the game draws only these colours, not a material's colour: tick **Tint by material** to bake each face's
