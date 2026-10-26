@@ -23,6 +23,8 @@ use the release zip.
 - **Surface**: makes the active material Solid, Water, Lava, Kill (a pit floor), Collider (invisible but solid),
   Nocollide (drawn, not solid) or Ledge. It puts the word in the material's name and sets the custom
   properties (`batchFlags`, `pass`, `triangleFlags`) the game's track importer reads.
+- **Lava needs ground under it**: Juno passes through lava (it doesn't hurt him), so a Lava surface over nothing is a
+  hole he falls through. Put a solid floor a little below every lava surface (about 30: he wades in it).
 - **Ledges**: the heroes grab an edge only where it is made a ledge: give a block's top the Ledge surface. The walls
   under its edges need nothing, as long as their top edges sit exactly on the top's corners: the game's track
   importer (jfgformats 0.3.0 and newer, which JFG-Studio uses) finds them. The hero catches the edge while falling

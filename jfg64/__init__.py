@@ -23,6 +23,7 @@ Scripting (an AI agent through a Blender MCP server, or any script): `import jfg
 - add_marker(context, kind, name=None).
 Check `jfg64.__version__` against what a guide asks for; after updating the add-on, restart Blender (a running
 Blender keeps the version it loaded).
+Lava: Juno passes through it (unhurt), so every Lava surface needs a solid floor a little below it (about 30).
 Spaces: Blender's own (Z up, 1 unit = 1 game unit); the export turns it into the game's Y up. Colours are RGB 0-1.
 The game takes its colour from the vertex colours alone (the "Col" layer): a material's base colour is not used, so
 use bake_light's tint to carry it into the bake.
@@ -35,12 +36,12 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.3.0"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.3.1"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 3, 0),
+    "version": (0, 3, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, vertex light, budgets and markers for JFG-Studio levels",
