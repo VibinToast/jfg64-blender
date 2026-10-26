@@ -21,11 +21,12 @@ use the release zip.
 ## What it does
 
 - **Surface**: makes the active material Solid, Water, Lava, Kill (a pit floor), Collider (invisible but solid),
-  Nocollide (drawn, not solid), Ledge or Ledgewall. It puts the word in the material's name and sets the custom
+  Nocollide (drawn, not solid) or Ledge. It puts the word in the material's name and sets the custom
   properties (`batchFlags`, `pass`, `triangleFlags`) the game's track importer reads.
-- **Ledges**: the heroes grab an edge only where it is made a ledge: give a block's top the Ledge surface and its
-  walls Ledgewall, with the walls' top edges exactly on the top's corners. The hero catches the edge while falling
-  past it. Everything else has no ledges.
+- **Ledges**: the heroes grab an edge only where it is made a ledge: give a block's top the Ledge surface. The walls
+  under its edges need nothing, as long as their top edges sit exactly on the top's corners: the game's track
+  importer (jfgformats 0.3.0 and newer, which JFG-Studio uses) finds them. The hero catches the edge while falling
+  past it. Everything else has no ledges. (Ledgewall flags such walls by hand, for older importers.)
 - **Vertex light**: bakes a sun and an ambient colour into the selected meshes' vertex colours (a `Col` byte colour
   attribute on face corners). A Sun lamp in the scene gives the direction. The game's levels are lit this way, and
   the game draws only these colours, not a material's colour: tick **Tint by material** to bake each face's
@@ -45,7 +46,9 @@ Then in JFG-Studio: **File › New project…** with the `.glb` as Geometry, or 
 Everything the panel does is also a function, for scripts and AI agents (through a Blender MCP server):
 `set_surface(material, kind)`, `bake_light(mesh, matrix_world, sun_dir, sun_colour, ambient, tint=False)`,
 `bake_scene(objects, tint=None)`, `budgets(objects)`, `export(path, objects=None, collection=None)` and
-`add_marker(context, kind)`. `help(jfg64)` lists them with the spaces and units each one takes.
+`add_marker(context, kind)`. `help(jfg64)` lists them with the spaces and units each one takes; `export` returns
+what it wrote (path, objects, triangles). `jfg64.__version__` says which version is loaded: after updating the
+add-on, restart Blender, as a running Blender keeps the version it started with.
 
 ## Test
 

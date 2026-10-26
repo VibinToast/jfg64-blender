@@ -12,14 +12,17 @@ In the 3D View's sidebar (N), tab "JFG":
 Studio checks every file with the game's own importer; this add-on only makes the common things quick.
 
 Scripting (an AI agent through a Blender MCP server, or any script): `import jfg64`, then
-- set_surface(material, kind): kind is one of SURFACES (solid, water, lava, kill, collider, nocollide, and ledge /
-  ledgewall: a grabbable ledge is a "ledge" top whose edges meet "ledgewall" walls exactly, sharing the top's
-  corners);
+- set_surface(material, kind): kind is one of SURFACES (solid, water, lava, kill, collider, nocollide, ledge): a
+  "ledge" top makes its edges grabbable where walls meet them exactly, sharing the top's corners (the track importer,
+  jfgformats 0.3.0 and newer, finds and flags those walls; "ledgewall" flags them by hand for older importers);
 - bake_light(mesh, world_matrix, sun_dir, sun_colour, ambient, tint=False): one mesh; bake_scene(objects, tint=False):
   several, with the panel's settings and the scene's Sun lamp;
 - budgets(objects) -> {"triangles", "images", "far", "surfaces"};
-- export(path, objects=None, collection=None): the visible objects, or only these objects / this collection;
+- export(path, objects=None, collection=None) -> {"path", "objects", "triangles"}: the visible objects, or only
+  these objects / this collection;
 - add_marker(context, kind, name=None).
+Check `jfg64.__version__` against what a guide asks for; after updating the add-on, restart Blender (a running
+Blender keeps the version it loaded).
 Spaces: Blender's own (Z up, 1 unit = 1 game unit); the export turns it into the game's Y up. Colours are RGB 0-1.
 The game takes its colour from the vertex colours alone (the "Col" layer): a material's base colour is not used, so
 use bake_light's tint to carry it into the bake.
@@ -32,10 +35,12 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
+__version__ = "0.3.0"  # bl_info's version too: raise both with every change (scripts check it)
+
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 1, 0),
+    "version": (0, 3, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, vertex light, budgets and markers for JFG-Studio levels",
@@ -287,7 +292,7 @@ def export(path, objects=None, collection=None):
                    export_cameras=False, export_lights=False)
     if objects is None:
         bpy.ops.export_scene.gltf(use_visible=True, **options)
-        return
+        return _summary(path, bpy.context.visible_objects)
     layer = bpy.context.view_layer
     selected, active = [o for o in layer.objects if o.select_get()], layer.objects.active
     try:
@@ -302,6 +307,12 @@ def export(path, objects=None, collection=None):
         for o in selected:
             o.select_set(True)
         layer.objects.active = active
+    return _summary(path, objects)
+
+
+def _summary(path, objects):
+    meshes = [o for o in objects if o.type == "MESH"]
+    return {"path": path, "objects": len(meshes), "triangles": budgets(meshes)["triangles"]}
 
 
 class JFG64Settings(bpy.types.PropertyGroup):
