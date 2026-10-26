@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.0"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.1"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 0),
+    "version": (0, 5, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -301,6 +301,8 @@ def game_texture_material(tex_id, surface="solid", name=None, scene=None):
 
 # ---------------------------------------------------------------------------------------------- organic shapes
 
+UV_SIZE = 256.0  # game units per texture repeat on generated walls and floors: the game's own levels are coarse,
+# and a finer scale makes the export cut many more faces (most game textures don't repeat)
 WALKABLE = 45.0  # degrees: the heroes walk up ramps this steep (55 is too steep; Studio's guide, "Scale")
 
 
@@ -471,14 +473,15 @@ def terrain_report(obj):
 
 
 def rock(name="rock", radius=60.0, seed=0, roughness=0.35, squash=0.7, location=(0.0, 0.0, 0.0), material=None,
-         collection=None, sink=0.25):
+         collection=None, sink=0.25, detail=1):
     """A lumpy boulder (an icosphere pushed about by noise), squashed to `squash` of its width and sunk `sink` of
     its height into the ground at `location`: cover squads take, a landmark, a step to jump from. Its
-    location's z is the ground there (ground_height). Two subdivisions: about 320 triangles."""
+    location's z is the ground there (ground_height). detail: icosphere subdivisions (1: 80 triangles, 2: 320;
+    keep it low, a level's whole budget is about 3,000)."""
     import bmesh
     import numpy as np
     bm = bmesh.new()
-    bmesh.ops.create_icosphere(bm, subdivisions=2, radius=1.0)
+    bmesh.ops.create_icosphere(bm, subdivisions=detail, radius=1.0)
     co = np.array([v.co[:] for v in bm.verts])
     n = _perlin(co[:, 0] * 1.7 + co[:, 2] * 0.9 + seed, co[:, 1] * 1.7 - co[:, 2] * 0.6, seed) * 0.6 + \
         _perlin(co[:, 0] * 3.9, co[:, 1] * 3.9 + co[:, 2] * 2.1, seed + 3) * 0.4
@@ -559,7 +562,7 @@ def _room_outline(room, seed):
     shape = room.get("shape", "round")
     rx, ry = (room["size"][0] / 2, room["size"][1] / 2) if "size" in room else (room["radius"], room["radius"])
     wobble = room.get("wobble", 0.06 if shape == "hall" else 0.18 if shape == "round" else 0.3)
-    n = max(12, int(2 * math.pi * max(rx, ry) / 60))
+    n = max(12, int(2 * math.pi * max(rx, ry) / 120))  # a corner every 120: enough to wander, not too many walls
     angles = np.linspace(0, 2 * math.pi, n, endpoint=False)
     noise = _perlin(np.cos(angles) * 1.5 + seed, np.sin(angles) * 1.5, seed) * 0.7 + \
         _perlin(np.cos(angles) * 3.1, np.sin(angles) * 3.1 + seed, seed + 1) * 0.3
@@ -611,8 +614,8 @@ class _Builder:
         mid = Vector(((a[0] + b[0]) / 2 - inside[0], (a[1] + b[1]) / 2 - inside[1], 0))
         length = math.hypot(b[0] - a[0], b[1] - a[1])
         self.face([(a[0], a[1], z0a), (b[0], b[1], z0b), (b[0], b[1], z1b), (a[0], a[1], z1a)], -mid, mat,
-                  [(run / 128, z0a / 128), ((run + length) / 128, z0b / 128), ((run + length) / 128, z1b / 128),
-                   (run / 128, z1a / 128)])
+                  [(run / UV_SIZE, z0a / UV_SIZE), ((run + length) / UV_SIZE, z0b / UV_SIZE), ((run + length) / UV_SIZE, z1b / UV_SIZE),
+                   (run / UV_SIZE, z1a / UV_SIZE)])
         return run + length
 
     def build(self, name, materials, collection):
@@ -681,7 +684,7 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
         axis = []
         for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
             length = math.hypot(x1 - x0, y1 - y0)
-            steps = max(1, int(length / 80))
+            steps = max(1, int(length / 160))
             nx, ny = -(y1 - y0) / max(length, 1e-9), (x1 - x0) / max(length, 1e-9)
             for s in range(steps):
                 t = s / steps
