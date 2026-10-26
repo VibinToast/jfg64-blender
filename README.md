@@ -66,3 +66,8 @@ blender --background --factory-startup --python <a script that imports jfg64, ca
 Studio's import check then reports what the game sees.
 
 Nothing from the game is in this add-on or in what it exports: you model your own levels.
+
+## License
+
+GPL-2.0-or-later, the licence Blender uses: see [LICENSE](LICENSE). You may use it under version 2 of the GNU General
+Public License or any later version.
