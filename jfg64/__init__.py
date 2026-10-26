@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.4.3"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.4.4"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 4, 3),
+    "version": (0, 4, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -488,10 +488,12 @@ def rock(name="rock", radius=60.0, seed=0, roughness=0.35, squash=0.7, location=
     bm.to_mesh(mesh)
     bm.free()
     uv = mesh.uv_layers.new(name="UV")
-    for poly in mesh.polygons:
+    for poly in mesh.polygons:  # each face from the side it faces, so the texture tiles evenly all round
+        n = poly.normal
+        axes = (0, 1) if abs(n.z) >= max(abs(n.x), abs(n.y)) else (1, 2) if abs(n.x) >= abs(n.y) else (0, 2)
         for li in poly.loop_indices:
             c = mesh.vertices[mesh.loops[li].vertex_index].co
-            uv.data[li].uv = ((c.x + c.y) / 128.0, c.z / 128.0)
+            uv.data[li].uv = (c[axes[0]] / 128.0, c[axes[1]] / 128.0)
     obj = bpy.data.objects.new(name, mesh)
     obj.location = location
     obj.rotation_euler.z = (seed * 2.399) % (2 * math.pi)
@@ -959,15 +961,34 @@ def _scene_of(objects, collection):
     return bpy.context.scene
 
 
+def wrap_uvs(mesh):
+    """Shifts each face's UVs by whole repeats so they start near 0. Nothing changes on screen (game textures tile),
+    but the game stores a texture coordinate in at most 1024 texels: UVs counted far along a long wall or a big
+    floor were clamped there and the texture stretched (play-tested). export does this to what it exports."""
+    for layer in mesh.uv_layers:
+        for poly in mesh.polygons:
+            idx = list(poly.loop_indices)
+            du = math.floor(min(layer.data[i].uv[0] for i in idx))
+            dv = math.floor(min(layer.data[i].uv[1] for i in idx))
+            if du or dv:
+                for i in idx:
+                    u, v = layer.data[i].uv
+                    layer.data[i].uv = (u - du, v - dv)
+
+
 def export(path, objects=None, collection=None):
     """A .glb for Studio: the visible objects of the window's scene, or only `objects` / the objects of `collection`
     (a Collection or its name), from whichever scene holds them: the window shows that scene for the export and
     goes back after. Only that scene's objects go out. The vertex colours are the "Col" layer bake_light writes.
-    Returns {"path", "objects", "triangles"} for what was written."""
+    Each face's UVs are shifted to start near 0 (wrap_uvs) on the way. Returns {"path", "objects", "triangles"} for
+    what was written."""
     coll = None
     if collection is not None:
         coll = bpy.data.collections[collection] if isinstance(collection, str) else collection
         objects = list(coll.all_objects)
+    for m in {o.data for o in (objects if objects is not None else bpy.context.visible_objects)
+              if o is not None and o.type == "MESH"}:
+        wrap_uvs(m)
     options = dict(filepath=path, export_format="GLB", export_extras=True, export_yup=True, export_apply=True,
                    export_normals=False, export_vertex_color="NAME", export_vertex_color_name="Col",
                    export_all_vertex_colors=False, export_animations=False, export_skins=False, export_morph=False,
