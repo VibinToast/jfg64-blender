@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.5.5"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.6.0"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 5, 5),
+    "version": (0, 6, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -570,11 +570,19 @@ def scatter_points(obj, count, seed=0, min_gap=150.0, max_slope=30.0, area=None,
 
 def _room_outline(room, seed):
     """A room's floor outline, counter-clockwise from above: about every 60 units round its centre, its radius
-    pushed in and out by noise ("wobble"); "hall" is a rounded rectangle, "round" and "cave" are blobs."""
+    pushed in and out by noise ("wobble"); "hall" is a rounded rectangle, "round" and "cave" are blobs, "box" an exact
+    rectangle (a built room: square corners, straight walls)."""
     import numpy as np
     cx, cy = room["at"]
     shape = room.get("shape", "round")
     rx, ry = (room["size"][0] / 2, room["size"][1] / 2) if "size" in room else (room["radius"], room["radius"])
+    if shape == "box":  # a built room: square corners, straight walls, a point every 120 or less for doorways
+        corners = [(cx + rx, cy - ry), (cx + rx, cy + ry), (cx - rx, cy + ry), (cx - rx, cy - ry)]
+        out = []
+        for (x0, y0), (x1, y1) in zip(corners, corners[1:] + corners[:1]):
+            n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / 120))
+            out += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n)]
+        return out
     wobble = room.get("wobble", 0.06 if shape == "hall" else 0.18 if shape == "round" else 0.3)
     n = max(12, int(2 * math.pi * max(rx, ry) / 120))  # a corner every 120: enough to wander, not too many walls
     angles = np.linspace(0, 2 * math.pi, n, endpoint=False)
@@ -655,14 +663,17 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     200 wide (150-300) with about 300 clearance in tunnels, rooms about 600-800 high.
 
     rooms: [{"name", "at": (x, y), "radius" or "size": (w, h), "floor": z (default 0), "height": wall height
-    (default 600), "shape": "round" | "cave" | "hall", "wobble": how far the outline wanders (0-0.4), "roof": a
-    ceiling (caves and indoor rooms; default False)}].
+    (default 600), "shape": "round" | "cave" | "hall" | "box" (an exact rectangle: a built room), "wobble": how far
+    the outline wanders (0-0.4), "roof": a ceiling (caves and indoor rooms; default False), "pit": a hole in the
+    middle of the floor down to a kill floor ({"radius"} or {"size": (w, h)}, "depth" default PIT_DEPTH): cross it
+    with `bridge`, or jump it}].
     links: [{"from": room, "to": room, "width" (default 200), "height" (default 300), "kind": "tunnel" (a roofed
     hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
     "wiggle": how far it wanders between bends (0-1), "landing": level floor this long at each end before the slope
     (default 0), "door": "from" | "to" | "both" (or {"end", "width", "height"}): a doorway frame on a level landing
     at that end, narrower and lower than the game's doors so a door hides its edges behind it (door_spots says where
-    each door goes)}]. A link's
+    each door goes), "from_floor" / "to_floor": the passage's floor at that end when it isn't the room's (a doorway
+    up in the wall, onto a balcony or platform you build there; the wall under it is filled)}]. A link's
     floor slopes from one room's floor to the other's: keep it under 45 degrees (layout_report says). A room or link may have its own "materials" ({"floor", "wall",
     "ceiling"}: an open yard's grass among cave rooms). Each link cuts a doorway in both rooms' walls, with a lintel
     over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). boundary: the walls of rooms and
@@ -749,13 +760,34 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
             (p1, e1), (p2, e2) = corners
             cuts.append((e1, p1, e2, p2, ln))
         pts, gaps = _cut_outline(outline, cuts)
+        pit = r.get("pit")
+        rim = _pit_rim(pts, (cx, cy), pit) if pit else None
         for i in range(len(pts)):
             a2, b2 = pts[i], pts[(i + 1) % len(pts)]
-            b.face([(cx, cy, z), (a2[0], a2[1], z), (b2[0], b2[1], z)], (0, 0, 1), sl["floor"],
-                   [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+            if rim is None:
+                b.face([(cx, cy, z), (a2[0], a2[1], z), (b2[0], b2[1], z)], (0, 0, 1), sl["floor"],
+                       [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+            else:  # a ring of floor round the pit
+                qa, qb = rim[i], rim[(i + 1) % len(pts)]
+                for tri in ((a2, b2, qb), (a2, qb, qa)):
+                    b.face([(q[0], q[1], z) for q in tri], (0, 0, 1), sl["floor"],
+                           [(q[0] / 256, q[1] / 256) for q in tri])
             if r.get("roof"):
                 b.face([(cx, cy, z + h), (a2[0], a2[1], z + h), (b2[0], b2[1], z + h)], (0, 0, -1),
                        sl["ceiling"], [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+        if rim is not None:  # the pit's walls down to its kill floor
+            depth = pit.get("depth", PIT_DEPTH)
+            if "kill" not in slot:
+                mats.append(kill_material())
+                slot["kill"] = len(mats) - 1
+            prun = 0.0
+            for i in range(len(rim)):
+                qa, qb = rim[i], rim[(i + 1) % len(rim)]
+                prun = b.wall(qa, qb, z - depth, z - depth, z, z, (cx, cy), sl["wall"], prun)
+            for i in range(len(rim)):
+                qa, qb = rim[i], rim[(i + 1) % len(rim)]
+                b.face([(cx, cy, z - depth), (qa[0], qa[1], z - depth), (qb[0], qb[1], z - depth)], (0, 0, 1),
+                       slot["kill"], [(cx / 256, cy / 256), (qa[0] / 256, qa[1] / 256), (qb[0] / 256, qb[1] / 256)])
         run = 0.0
         for i in range(len(pts)):
             a2, b2 = pts[i], pts[(i + 1) % len(pts)]
@@ -764,15 +796,19 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
                 run = b.wall(a2, b2, z, z, z + h, z + h, (cx, cy), sl["wall"], run)
                 if boundary and not r.get("roof"):
                     b.wall(a2, b2, z + h, z + h, z + h + boundary, z + h + boundary, (cx, cy), slot["edge"])
-            elif gap.get("kind", "tunnel") == "tunnel" and gap.get("height", 300) < h:
-                top = z + gap.get("height", 300)
-                run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), sl["wall"], run)  # the lintel
+            else:
+                lz = _end_floor(gap, r)  # the passage's floor at this doorway (raised: onto a balcony)
+                if lz > z + 1:
+                    b.wall(a2, b2, z, z, lz, lz, (cx, cy), sl["wall"], run)  # the wall under a raised doorway
+                if gap.get("kind", "tunnel") == "tunnel" and lz + gap.get("height", 300) < z + h:
+                    top = lz + gap.get("height", 300)
+                    run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), sl["wall"], run)  # the lintel
     # links: floor, walls, roof along the axis, from one room's doorway to the other's
     doors = []
     for ln, axis, ends in paths:
         (ra, ca, ia), (rc, cc, ic) = ends
         inner = axis[ia - 1: len(axis) - ic + 1]
-        za, zc = ra.get("floor", 0.0), rc.get("floor", 0.0)
+        za, zc = _end_floor(ln, ra), _end_floor(ln, rc)
         w, hh = ln.get("width", 200) / 2, ln.get("height", 300)
         kind = ln.get("kind", "tunnel")
         sl = own(ln)
@@ -856,6 +892,147 @@ def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, coll
     obj["jfg_layout"] = json.dumps({"rooms": rooms, "links": links, "seed": seed}, default=str)
     obj["jfg_doors"] = json.dumps(doors)
     return obj
+
+
+PIT_DEPTH = 500  # a pit's kill floor this far under the room's floor: out of sight, past any jump back
+
+
+def kill_material():
+    """The material of a pit's floor: a Kill surface (the hero dies on touching it), dark, made once."""
+    mat = bpy.data.materials.get("pit_floor_kill")
+    if mat is None:
+        mat = bpy.data.materials.new("pit_floor")
+        mat.diffuse_color = (0.05, 0.05, 0.07, 1.0)
+        set_surface(mat, "kill")
+    return mat
+
+
+def _end_floor(ln, room):
+    """A link's floor at `room`'s end: its "from_floor" / "to_floor", else the room's floor."""
+    key = "from_floor" if ln.get("from") == room["name"] else "to_floor"
+    return float(ln.get(key, room.get("floor", 0.0)))
+
+
+def _pit_rim(pts, c, pit):
+    """The pit's edge, one point per room outline point on the line from the centre to it: a circle ("radius") or a
+    rectangle ("size"), kept at least 60 inside the outline."""
+    out = []
+    for x, y in pts:
+        vx, vy = x - c[0], y - c[1]
+        dist = math.hypot(vx, vy) or 1.0
+        if "size" in pit:
+            hx, hy = pit["size"][0] / 2, pit["size"][1] / 2
+            f = min(hx / abs(vx) if abs(vx) > 1e-9 else 1e9, hy / abs(vy) if abs(vy) > 1e-9 else 1e9)
+            f = min(f, (dist - 60) / dist)
+        else:
+            f = min(pit.get("radius", 200.0), dist - 60) / dist
+        f = max(f, 0.05)
+        out.append((c[0] + vx * f, c[1] + vy * f))
+    return out
+
+
+def _box_faces(b, quads, mat):
+    for corners, want in quads:
+        ax = 0 if abs(want[0]) >= max(abs(want[1]), abs(want[2])) else 1 if abs(want[1]) >= abs(want[2]) else 2
+        keep = [k for k in range(3) if k != ax]
+        b.face(corners, want, mat, [(c[keep[0]] / UV_SIZE, c[keep[1]] / UV_SIZE) for c in corners])
+
+
+def platform(name, rect, base, height, material=None, top_material=None, collection=None):
+    """A raised block standing on the floor: a balcony along a wall, a stage, a terrace step or a walkway. rect:
+    (x0, y0, x1, y1); base: the floor's z under it; height: its top over the base. Its top is walkable (give
+    `top_material` the ledge surface to make its edges grabbable). Reach it with `ramp` or steps of about 70
+    (Studio's check says when a key is out of reach). Returns the object."""
+    x0, y0, x1, y1 = min(rect[0], rect[2]), min(rect[1], rect[3]), max(rect[0], rect[2]), max(rect[1], rect[3])
+    z0, z1 = base - 20, base + height  # its foot a little under the floor: no gap where the floor dips
+    b = _Builder()
+    top = [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    b.face(top, (0, 0, 1), 0, [(c[0] / UV_SIZE, c[1] / UV_SIZE) for c in top])
+    _box_faces(b, [([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)], (0, -1, 0)),
+                   ([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)], (1, 0, 0)),
+                   ([(x1, y1, z0), (x0, y1, z0), (x0, y1, z1), (x1, y1, z1)], (0, 1, 0)),
+                   ([(x0, y1, z0), (x0, y0, z0), (x0, y0, z1), (x0, y1, z1)], (-1, 0, 0))], 1)
+    return b.build(name, [top_material or material, material], collection)
+
+
+def ramp(name, start, end, width, z0, z1, material=None, base=None, collection=None):
+    """A sloped walkway from start (x, y) at height z0 to end at z1, width wide, with its sides walled down to
+    `base` (default the lower end): onto a platform or balcony, or between floors. Raises ValueError when steeper
+    than WALKABLE. Returns the object."""
+    length = math.hypot(end[0] - start[0], end[1] - start[1])
+    if length < 1:
+        raise ValueError("a ramp needs a start and an end apart")
+    slope = math.degrees(math.atan2(abs(z1 - z0), length))
+    if slope > WALKABLE:
+        raise ValueError(f"ramp {name!r} is {slope:.0f} degrees: the heroes walk up {WALKABLE:.0f} at most (make it "
+                         "longer)")
+    d = ((end[0] - start[0]) / length, (end[1] - start[1]) / length)
+    s = (-d[1] * width / 2, d[0] * width / 2)
+    low = (min(z0, z1) if base is None else base) - 20
+    l0, r0 = (start[0] + s[0], start[1] + s[1]), (start[0] - s[0], start[1] - s[1])
+    l1, r1 = (end[0] + s[0], end[1] + s[1]), (end[0] - s[0], end[1] - s[1])
+    b = _Builder()
+    deck = [(l0[0], l0[1], z0), (r0[0], r0[1], z0), (r1[0], r1[1], z1), (l1[0], l1[1], z1)]
+    b.face(deck, (0, 0, 1), 0, [(0, 0), (width / UV_SIZE, 0), (width / UV_SIZE, length / UV_SIZE),
+                                (0, length / UV_SIZE)])
+    mid = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+    b.wall(l0, l1, low, low, z0, z1, (mid[0] + s[0] * 2, mid[1] + s[1] * 2), 0)  # each side faces out (wall faces
+    b.wall(r0, r1, low, low, z0, z1, (mid[0] - s[0] * 2, mid[1] - s[1] * 2), 0)  # the side its point is on)
+    for pa, pb, zz, inside in ((l0, r0, z0, (start[0] - d[0] * 50, start[1] - d[1] * 50)),
+                               (l1, r1, z1, (end[0] + d[0] * 50, end[1] + d[1] * 50))):  # its ends, facing out
+        if zz - low > 21:
+            b.wall(pa, pb, low, low, zz, zz, inside, 0)
+    return b.build(name, [material], collection)
+
+
+def bridge(name, a, b_end, z, width=160.0, rails=45.0, thickness=25.0, material=None, collection=None):
+    """A deck across a pit or chasm from a (x, y) to b_end, its top at z, `thickness` deep, with low rails along
+    both sides (`rails` high; 0: none). Its ends should rest on floor at z. Returns the object."""
+    length = math.hypot(b_end[0] - a[0], b_end[1] - a[1])
+    if length < 1:
+        raise ValueError("a bridge needs two ends apart")
+    d = ((b_end[0] - a[0]) / length, (b_end[1] - a[1]) / length)
+    s = (-d[1] * width / 2, d[0] * width / 2)
+    l0, r0 = (a[0] + s[0], a[1] + s[1]), (a[0] - s[0], a[1] - s[1])
+    l1, r1 = (b_end[0] + s[0], b_end[1] + s[1]), (b_end[0] - s[0], b_end[1] - s[1])
+    bld = _Builder()
+    uv = [(0, 0), (width / UV_SIZE, 0), (width / UV_SIZE, length / UV_SIZE), (0, length / UV_SIZE)]
+    bld.face([(l0[0], l0[1], z), (r0[0], r0[1], z), (r1[0], r1[1], z), (l1[0], l1[1], z)], (0, 0, 1), 0, uv)
+    bot = z - thickness
+    bld.face([(l0[0], l0[1], bot), (r0[0], r0[1], bot), (r1[0], r1[1], bot), (l1[0], l1[1], bot)], (0, 0, -1), 0, uv)
+    mid = ((a[0] + b_end[0]) / 2, (a[1] + b_end[1]) / 2)
+    bld.wall(l0, l1, bot, bot, z, z, (mid[0] + s[0] * 2, mid[1] + s[1] * 2), 0)  # the deck's edges, facing out
+    bld.wall(r0, r1, bot, bot, z, z, (mid[0] - s[0] * 2, mid[1] - s[1] * 2), 0)
+    if rails:
+        k = 1 - 8 / (width / 2)  # rails 8 thick, on the deck's edges
+        il0, il1 = (a[0] + s[0] * k, a[1] + s[1] * k), (b_end[0] + s[0] * k, b_end[1] + s[1] * k)
+        ir0, ir1 = (a[0] - s[0] * k, a[1] - s[1] * k), (b_end[0] - s[0] * k, b_end[1] - s[1] * k)
+        top = z + rails
+        bld.wall(l0, l1, z, z, top, top, (mid[0] + s[0] * 2, mid[1] + s[1] * 2), 0)  # outer faces
+        bld.wall(r0, r1, z, z, top, top, (mid[0] - s[0] * 2, mid[1] - s[1] * 2), 0)
+        bld.wall(il0, il1, z, z, top, top, mid, 0)  # inner faces, facing the deck
+        bld.wall(ir0, ir1, z, z, top, top, mid, 0)
+        for p0, p1, q0, q1 in ((l0, l1, il0, il1), (r0, r1, ir0, ir1)):
+            cap = [(p0[0], p0[1], top), (q0[0], q0[1], top), (q1[0], q1[1], top), (p1[0], p1[1], top)]
+            bld.face(cap, (0, 0, 1), 0, [(c[0] / UV_SIZE, c[1] / UV_SIZE) for c in cap])
+    return bld.build(name, [material], collection)
+
+
+def building(rooms, links, height=400.0, corridor="tunnel", width=200.0):
+    """A built place for `layout`: rooms as exact rectangles ("box") with roofs, joined by straight corridors that
+    turn at right angles. rooms: [{"name", "at", "size", ...}] (any layout room keys); links: [{"from", "to", ...}]
+    (any layout link keys; without "via", a corridor between rooms out of line takes one right-angled turn).
+    Returns (rooms, links) for layout(); mix them with other rooms and links of your own."""
+    by = {r["name"]: r for r in rooms}
+    out_rooms = [{"shape": "box", "roof": True, "height": height, **r} for r in rooms]
+    out_links = []
+    for ln in links:
+        a, c = by[ln["from"]]["at"], by[ln["to"]]["at"]
+        link = {"kind": corridor, "width": width, "wiggle": 0.0, **ln}
+        if "via" not in ln and abs(a[0] - c[0]) > 1 and abs(a[1] - c[1]) > 1:
+            link["via"] = [(c[0], a[1])] if abs(c[0] - a[0]) >= abs(c[1] - a[1]) else [(a[0], c[1])]
+        out_links.append(link)
+    return out_rooms, out_links
 
 
 DOOR_LANDING = 160  # level floor before a link's slope, for a door
