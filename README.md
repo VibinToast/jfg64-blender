@@ -37,7 +37,7 @@ use the release zip.
   builds it in its data folder the first time you open a project). Pick one by colour or by the game level that uses
   it, see it as a thumbnail, and **Use on active object**. A level painted with them carries none of them: Studio
   names them by number and each player's game shows them. Don't edit their pixels: an edited copy is a new image,
-  and the game's art can't go in a pack (Studio refuses it).
+  and the game's art can't go in a pack (Studio refuses it). Most of the game's textures don't repeat (its levels map them once per polygon): the export cuts faces using them along their repeat lines, so they tile anyway.
 - **Budgets**: triangles, game textures (not carried), images (each becomes a new texture of the game's, at most 2048 pixels: 64 x 32 ...; bigger
   ones are shrunk), the farthest vertex (the game
   takes up to 32767 units from the origin) and the surfaces in use.

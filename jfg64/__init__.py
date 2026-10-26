@@ -50,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.4.4"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.5.0"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 4, 4),
+    "version": (0, 5, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -293,6 +293,8 @@ def game_texture_material(tex_id, surface="solid", name=None, scene=None):
         mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
         if _library_index(folder).get(f"{int(tex_id):04X}", {}).get("alpha") not in (None, "none"):
             mat.node_tree.links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
+    entry = _library_index(folder).get(f"{int(tex_id):04X}", {})
+    mat["jfg_repeat"] = [int(bool(r)) for r in entry.get("repeat", [True, True])]
     set_surface(mat, surface)
     return mat
 
@@ -961,6 +963,99 @@ def _scene_of(objects, collection):
     return bpy.context.scene
 
 
+def _clamped_axes(mat):
+    """The UV axes along which a material's texture doesn't repeat: (u, v) flags. A game texture's come from the
+    library ("jfg_repeat"); any other image repeats."""
+    rep = mat.get("jfg_repeat") if mat is not None else None
+    if rep is None:
+        return (False, False)
+    return (not rep[0], not rep[1])
+
+
+def _split_at_repeats(poly, axis):
+    """Cuts a convex polygon [(co, uv, col)] along the whole-number lines of its uv[axis]: pieces each within one
+    repeat on that axis."""
+    lo, hi = min(c[1][axis] for c in poly), max(c[1][axis] for c in poly)
+    pieces = [poly]
+    for k in range(math.floor(lo) + 1, math.ceil(hi)):
+        out = []
+        for pc in pieces:
+            below, above = [], []
+            for i, a in enumerate(pc):
+                b = pc[(i + 1) % len(pc)]
+                da, db = a[1][axis] - k, b[1][axis] - k
+                (below if da <= 0 else above).append(a)
+                if (da < -1e-6 < 1e-6 < db) or (db < -1e-6 < 1e-6 < da):
+                    f = da / (da - db)
+                    mid = (tuple(a[0][j] + (b[0][j] - a[0][j]) * f for j in range(3)),
+                           tuple(a[1][j] + (b[1][j] - a[1][j]) * f for j in range(2)),
+                           tuple(a[2][j] + (b[2][j] - a[2][j]) * f for j in range(4)))
+                    below.append(mid)
+                    above.append(mid)
+            out += [x for x in (below, above) if len(x) >= 3]
+        pieces = out
+    return pieces
+
+
+def _tiled_copy(obj, scene):
+    """A temporary copy of mesh object `obj` (modifiers applied) whose faces with a clamping game texture are cut
+    so each piece holds one repeat on each clamped axis; None when no face needs it. Most of the game's level
+    textures clamp (its levels map them once per polygon): past one repeat they smear (play-tested)."""
+    mats = [s.material for s in obj.material_slots]
+    clamps = [_clamped_axes(m) for m in mats] or [(False, False)]
+    if not any(any(c) for c in clamps):
+        return None
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    evaluated = obj.evaluated_get(depsgraph)
+    src = evaluated.to_mesh()
+    src.calc_loop_triangles()
+    uv = src.uv_layers.active
+    col = src.color_attributes.get("Col")
+    verts, faces, face_mats, uvs, cols = [], [], [], [], []
+    for tri in src.loop_triangles:
+        cl = clamps[tri.material_index] if tri.material_index < len(clamps) else (False, False)
+        poly = []
+        for li, vi in zip(tri.loops, tri.vertices):
+            if col is None:
+                c = (1.0, 1.0, 1.0, 1.0)
+            else:
+                c = tuple(col.data[li].color) if col.domain == "CORNER" else tuple(col.data[vi].color)
+            poly.append((tuple(src.vertices[vi].co), tuple(uv.data[li].uv) if uv else (0.0, 0.0), c))
+        pieces = [poly]
+        for axis in (0, 1):
+            if cl[axis]:
+                pieces = [q for pc in pieces for q in _split_at_repeats(pc, axis)]
+        for pc in pieces:
+            for k in range(1, len(pc) - 1):  # each piece is convex: a fan
+                base = len(verts)
+                for c in (pc[0], pc[k], pc[k + 1]):
+                    verts.append(c[0])
+                    uvs.append(c[1])
+                    cols.append(c[2])
+                faces.append((base, base + 1, base + 2))
+                face_mats.append(tri.material_index)
+    evaluated.to_mesh_clear()
+    mesh = bpy.data.meshes.new(obj.name + "_tiled")
+    mesh.from_pydata(verts, [], faces)
+    for m in mats:
+        mesh.materials.append(m)
+    layer = mesh.uv_layers.new(name="UV")
+    colour = mesh.color_attributes.new("Col", "BYTE_COLOR", "CORNER")
+    for poly, mi in zip(mesh.polygons, face_mats):
+        poly.material_index = mi
+        for li in poly.loop_indices:
+            vi = mesh.loops[li].vertex_index
+            layer.data[li].uv = uvs[vi]
+            colour.data[li].color = cols[vi]
+    mesh.update()
+    copy = bpy.data.objects.new(obj.name + "_tiled", mesh)
+    copy.matrix_world = obj.matrix_world.copy()
+    for k in obj.keys():
+        copy[k] = obj[k]
+    scene.collection.objects.link(copy)
+    return copy
+
+
 def wrap_uvs(mesh):
     """Shifts each face's UVs by whole repeats so they start near 0. Nothing changes on screen (game textures tile),
     but the game stores a texture coordinate in at most 1024 texels: UVs counted far along a long wall or a big
@@ -968,8 +1063,9 @@ def wrap_uvs(mesh):
     for layer in mesh.uv_layers:
         for poly in mesh.polygons:
             idx = list(poly.loop_indices)
-            du = math.floor(min(layer.data[i].uv[0] for i in idx))
-            dv = math.floor(min(layer.data[i].uv[1] for i in idx))
+            # a piece cut at a repeat line may start a hair below it: it belongs to the repeat above
+            du = math.floor(min(layer.data[i].uv[0] for i in idx) + 1e-3)
+            dv = math.floor(min(layer.data[i].uv[1] for i in idx) + 1e-3)
             if du or dv:
                 for i in idx:
                     u, v = layer.data[i].uv
@@ -986,9 +1082,33 @@ def export(path, objects=None, collection=None):
     if collection is not None:
         coll = bpy.data.collections[collection] if isinstance(collection, str) else collection
         objects = list(coll.all_objects)
-    for m in {o.data for o in (objects if objects is not None else bpy.context.visible_objects)
-              if o is not None and o.type == "MESH"}:
+    chosen = [o for o in (objects if objects is not None else bpy.context.visible_objects) if o is not None]
+    temps = {}
+    for o in chosen:
+        if o.type == "MESH":
+            tiled = _tiled_copy(o, _scene_of([o], coll))
+            if tiled is not None:
+                temps[o] = tiled
+    shown = []
+    if temps:  # the cut copies go out in place of their originals, which stay as they were
+        objects = [temps.get(o, o) for o in chosen]
+        shown = [o for o in temps if not o.hide_get()]
+        for o in shown:
+            o.hide_set(True)
+    for m in {o.data for o in (objects if objects is not None else chosen) if o.type == "MESH"}:
         wrap_uvs(m)
+    try:
+        return _export(path, objects, coll)
+    finally:
+        for tiled in temps.values():
+            mesh = tiled.data
+            bpy.data.objects.remove(tiled)
+            bpy.data.meshes.remove(mesh)
+        for o in shown:
+            o.hide_set(False)
+
+
+def _export(path, objects, coll):
     options = dict(filepath=path, export_format="GLB", export_extras=True, export_yup=True, export_apply=True,
                    export_normals=False, export_vertex_color="NAME", export_vertex_color_name="Col",
                    export_all_vertex_colors=False, export_animations=False, export_skins=False, export_morph=False,
