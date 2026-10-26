@@ -29,7 +29,9 @@ Scripting (an AI agent through a Blender MCP server, or any script): `import jfg
 - organic shapes instead of boxes: terrain(...) -> a ground mesh from layered noise (hills, ridges, terraces), with
   flat clearings, carved paths, a rim of hills round the edge and its slopes kept walkable (terrain_report says how
   much); rock(...) -> a lumpy boulder (cover for squads); scatter_points(terrain, count, ...) -> spots on its
-  walkable ground for rocks, pickups or Studio objects.
+  walkable ground for rocks, pickups or Studio objects; layout(name, rooms, links, ...) -> rooms of their own
+  shapes (round, cave, hall) at their own floor heights, joined by tunnels, corridors or canyons that cut doorways
+  in them, as the game's levels are laid out; layout_report(obj).
 Check `jfg64.__version__` against what a guide asks for; after updating the add-on, restart Blender (a running
 Blender keeps the version it loaded).
 Lava: Juno passes through it (unhurt), so every Lava surface needs a solid floor a little below it (about 30).
@@ -48,12 +50,12 @@ import bpy.utils.previews
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from mathutils import Vector
 
-__version__ = "0.4.0"  # bl_info's version too: raise both with every change (scripts check it)
+__version__ = "0.4.1"  # bl_info's version too: raise both with every change (scripts check it)
 
 bl_info = {
     "name": "jfg64: Jet Force Gemini levels",
     "author": "VibinToast",
-    "version": (0, 4, 0),
+    "version": (0, 4, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > JFG",
     "description": "Surfaces, game textures, vertex light, budgets and markers for JFG-Studio levels",
@@ -507,6 +509,291 @@ def scatter_points(obj, count, seed=0, min_gap=150.0, max_slope=30.0, area=None,
         w = obj.matrix_world @ loc
         out.append((round(w.x, 1), round(w.y, 1), round(w.z, 1)))
     return out
+
+
+# ------------------------------------------------------------------------------------- rooms and tunnels
+
+def _room_outline(room, seed):
+    """A room's floor outline, counter-clockwise from above: about every 60 units round its centre, its radius
+    pushed in and out by noise ("wobble"); "hall" is a rounded rectangle, "round" and "cave" are blobs."""
+    import numpy as np
+    cx, cy = room["at"]
+    shape = room.get("shape", "round")
+    rx, ry = (room["size"][0] / 2, room["size"][1] / 2) if "size" in room else (room["radius"], room["radius"])
+    wobble = room.get("wobble", 0.06 if shape == "hall" else 0.18 if shape == "round" else 0.3)
+    n = max(12, int(2 * math.pi * max(rx, ry) / 60))
+    angles = np.linspace(0, 2 * math.pi, n, endpoint=False)
+    noise = _perlin(np.cos(angles) * 1.5 + seed, np.sin(angles) * 1.5, seed) * 0.7 + \
+        _perlin(np.cos(angles) * 3.1, np.sin(angles) * 3.1 + seed, seed + 1) * 0.3
+    out = []
+    for a, k in zip(angles, noise):
+        c, s = math.cos(a), math.sin(a)
+        if shape == "hall":  # a rounded rectangle: the superellipse |x|^4 + |y|^4 = 1
+            r = (abs(c) ** 4 + abs(s) ** 4) ** -0.25
+            x, y = rx * r * c, ry * r * s
+        else:
+            x, y = rx * c, ry * s
+        f = 1 + wobble * k
+        out.append((cx + x * f, cy + y * f))
+    return out
+
+
+def _cross(p, d, a, b, both=False):
+    """Where the ray p + t d (the whole line with `both`) crosses segment a-b: (t, u) or None."""
+    ex, ey = b[0] - a[0], b[1] - a[1]
+    den = d[0] * ey - d[1] * ex
+    if abs(den) < 1e-9:
+        return None
+    t = ((a[0] - p[0]) * ey - (a[1] - p[1]) * ex) / den
+    u = ((a[0] - p[0]) * d[1] - (a[1] - p[1]) * d[0]) / den
+    return (t, u) if 0 <= u <= 1 and (both or t >= 0) else None
+
+
+class _Builder:
+    """Faces with the side they must face (normals are flipped to it), per material slot."""
+
+    def __init__(self):
+        self.verts, self.faces, self.mats, self.uvs = [], [], [], []
+
+    def face(self, pts, want, mat, uv):
+        pts = [Vector(p) for p in pts]
+        n = (pts[1] - pts[0]).cross(pts[2] - pts[0])
+        if n.length < 1e-6:
+            return
+        if n.dot(Vector(want)) < 0:
+            pts, uv = pts[::-1], uv[::-1]
+        base = len(self.verts)
+        self.verts += [p[:] for p in pts]
+        self.faces.append(tuple(range(base, base + len(pts))))
+        self.mats.append(mat)
+        self.uvs.append(uv)
+
+    def wall(self, a, b, z0a, z0b, z1a, z1b, inside, mat, run=0.0):
+        """A wall from a to b (x, y), bottom z0, top z1 at each end, facing the `inside` point's side."""
+        mid = Vector(((a[0] + b[0]) / 2 - inside[0], (a[1] + b[1]) / 2 - inside[1], 0))
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        self.face([(a[0], a[1], z0a), (b[0], b[1], z0b), (b[0], b[1], z1b), (a[0], a[1], z1a)], -mid, mat,
+                  [(run / 128, z0a / 128), ((run + length) / 128, z0b / 128), ((run + length) / 128, z1b / 128),
+                   (run / 128, z1a / 128)])
+        return run + length
+
+    def build(self, name, materials, collection):
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(self.verts, [], self.faces)
+        for m in materials:
+            mesh.materials.append(m)
+        uv = mesh.uv_layers.new(name="UV")
+        for poly, mat, coords in zip(mesh.polygons, self.mats, self.uvs):
+            poly.material_index = mat
+            for li, c in zip(poly.loop_indices, coords):
+                uv.data[li].uv = c
+        mesh.validate()
+        mesh.update()
+        obj = bpy.data.objects.new(name, mesh)
+        (collection or bpy.context.scene.collection).objects.link(obj)
+        return obj
+
+
+def layout(name, rooms, links, floor=None, wall=None, ceiling=None, seed=0, collection=None):
+    """A level laid out as the game's are: rooms of their own shapes joined by tunnels, corridors and canyons,
+    instead of one big box. The defaults are the game's own (JFG-Studio's study of its levels): passages about
+    200 wide (150-300) with about 300 clearance in tunnels, rooms about 600-800 high.
+
+    rooms: [{"name", "at": (x, y), "radius" or "size": (w, h), "floor": z (default 0), "height": wall height
+    (default 600), "shape": "round" | "cave" | "hall", "wobble": how far the outline wanders (0-0.4), "roof": a
+    ceiling (caves and indoor rooms; default False)}].
+    links: [{"from": room, "to": room, "width" (default 200), "height" (default 300), "kind": "tunnel" (a roofed
+    hallway) | "corridor" (walls, open above) | "canyon" (tall walls, open above), "via": [(x, y), ...] (bends),
+    "wiggle": how far it wanders between bends (0-1)}]. A link's floor slopes from one room's floor to the other's:
+    keep it under 45 degrees (layout_report says). Each link cuts a doorway in both rooms' walls, with a lintel
+    over a tunnel's. floor, wall, ceiling: materials (a game texture's, or your own). Returns the object."""
+    import numpy as np
+    by_name = {r["name"]: r for r in rooms}
+    b = _Builder()
+    mats = [m for m in (floor, wall, ceiling) if m is not None]
+    slot = {k: (mats.index(m) if m is not None else 0) for k, m in (("floor", floor), ("wall", wall),
+                                                                    ("ceiling", ceiling))}
+    outlines = {r["name"]: _room_outline(r, seed + i * 17) for i, r in enumerate(rooms)}
+    mouths = {r["name"]: [] for r in rooms}  # (index of the outline edge it opens, its two corners, link)
+    paths = []
+    for k, ln in enumerate(links):
+        a, c = by_name[ln["from"]], by_name[ln["to"]]
+        w = ln.get("width", 200) / 2
+        pts = [tuple(a["at"])] + [tuple(p) for p in ln.get("via", [])] + [tuple(c["at"])]
+        # wander between bends: noise sideways along each leg
+        wiggle = ln.get("wiggle", 0.0)
+        axis = []
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            length = math.hypot(x1 - x0, y1 - y0)
+            steps = max(1, int(length / 80))
+            nx, ny = -(y1 - y0) / max(length, 1e-9), (x1 - x0) / max(length, 1e-9)
+            for s in range(steps):
+                t = s / steps
+                off = wiggle * w * 2 * float(_perlin(np.array(t * length / 300 + k * 7.3), np.array(k * 3.1),
+                                                     seed + k)) * math.sin(math.pi * t)
+                axis.append((x0 + (x1 - x0) * t + nx * off, y0 + (y1 - y0) * t + ny * off))
+        axis.append(pts[-1])
+        ends = []
+        for room, seq in ((a, axis), (c, axis[::-1])):  # where the link leaves each room
+            outline = outlines[room["name"]]
+            i = next(i for i in range(1, len(seq)) if not _inside_poly(outline, seq[i]))
+            p, q = seq[i - 1], seq[i]
+            d = (q[0] - p[0], q[1] - p[1])
+            dl = math.hypot(*d)
+            d = (d[0] / dl, d[1] / dl)
+            side = (-d[1], d[0])
+            exit_t, _ = min(h for e in range(len(outline))
+                            if (h := _cross(p, d, outline[e], outline[(e + 1) % len(outline)])))
+            ex = (p[0] + d[0] * exit_t, p[1] + d[1] * exit_t)  # where the link's axis leaves the room
+            corners = []
+            for sgn in (1, -1):  # each side line's crossing of the outline nearest the axis's
+                o = (p[0] + side[0] * w * sgn, p[1] + side[1] * w * sgn)
+                want = (ex[0] + side[0] * w * sgn, ex[1] + side[1] * w * sgn)
+                hits = []
+                for e in range(len(outline)):
+                    h = _cross(o, d, outline[e], outline[(e + 1) % len(outline)], both=True)
+                    if h is not None:
+                        pt = (o[0] + d[0] * h[0], o[1] + d[1] * h[0])
+                        hits.append((math.hypot(pt[0] - want[0], pt[1] - want[1]), pt, e))
+                if not hits:
+                    raise ValueError(f"link {ln.get('from')}-{ln.get('to')} is wider than room {room['name']!r}")
+                _, pt, e = min(hits)
+                corners.append((pt, e))
+            ends.append((room, corners, i))
+            mouths[room["name"]].append((corners, ln))
+        paths.append((ln, axis, ends))
+    # rooms: floor, walls with doorways cut, roof
+    for r in rooms:
+        outline = list(outlines[r["name"]])
+        z, h = r.get("floor", 0.0), r.get("height", 600.0)
+        cx, cy = r["at"]
+        cuts = []  # replace the outline between each mouth's corners by the two corners
+        for corners, ln in mouths[r["name"]]:
+            (p1, e1), (p2, e2) = corners
+            cuts.append((e1, p1, e2, p2, ln))
+        pts, gaps = _cut_outline(outline, cuts)
+        for i in range(len(pts)):
+            a2, b2 = pts[i], pts[(i + 1) % len(pts)]
+            b.face([(cx, cy, z), (a2[0], a2[1], z), (b2[0], b2[1], z)], (0, 0, 1), slot["floor"],
+                   [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+            if r.get("roof"):
+                b.face([(cx, cy, z + h), (a2[0], a2[1], z + h), (b2[0], b2[1], z + h)], (0, 0, -1),
+                       slot["ceiling"], [(cx / 256, cy / 256), (a2[0] / 256, a2[1] / 256), (b2[0] / 256, b2[1] / 256)])
+        run = 0.0
+        for i in range(len(pts)):
+            a2, b2 = pts[i], pts[(i + 1) % len(pts)]
+            gap = gaps.get(i)
+            if gap is None:
+                run = b.wall(a2, b2, z, z, z + h, z + h, (cx, cy), slot["wall"], run)
+            elif gap.get("kind", "tunnel") == "tunnel" and gap.get("height", 300) < h:
+                top = z + gap.get("height", 300)
+                run = b.wall(a2, b2, top, top, z + h, z + h, (cx, cy), slot["wall"], run)  # the lintel
+    # links: floor, walls, roof along the axis, from one room's doorway to the other's
+    for ln, axis, ends in paths:
+        (ra, ca, ia), (rc, cc, ic) = ends
+        inner = axis[ia - 1: len(axis) - ic + 1]
+        za, zc = ra.get("floor", 0.0), rc.get("floor", 0.0)
+        w, hh = ln.get("width", 200) / 2, ln.get("height", 300)
+        kind = ln.get("kind", "tunnel")
+        wall_h = hh if kind != "canyon" else max(hh, 400)
+        lefts, rights = [ca[0][0]], [ca[1][0]]
+        for j in range(1, len(inner) - 1):
+            p0, p1 = inner[j - 1], inner[j + 1]
+            d = (p1[0] - p0[0], p1[1] - p0[1])
+            dl = math.hypot(*d) or 1
+            side = (-d[1] / dl, d[0] / dl)
+            lefts.append((inner[j][0] + side[0] * w, inner[j][1] + side[1] * w))
+            rights.append((inner[j][0] - side[0] * w, inner[j][1] - side[1] * w))
+        lefts.append(cc[1][0])
+        rights.append(cc[0][0])
+        dist = [0.0]
+        for j in range(1, len(lefts)):
+            m0 = ((lefts[j - 1][0] + rights[j - 1][0]) / 2, (lefts[j - 1][1] + rights[j - 1][1]) / 2)
+            m1 = ((lefts[j][0] + rights[j][0]) / 2, (lefts[j][1] + rights[j][1]) / 2)
+            dist.append(dist[-1] + math.hypot(m1[0] - m0[0], m1[1] - m0[1]))
+        total = dist[-1] or 1
+        zs = [za + (zc - za) * (d / total) for d in dist]
+        for j in range(len(lefts) - 1):
+            l0, l1, r0, r1 = lefts[j], lefts[j + 1], rights[j], rights[j + 1]
+            z0, z1 = zs[j], zs[j + 1]
+            mid = ((l0[0] + r0[0] + l1[0] + r1[0]) / 4, (l0[1] + r0[1] + l1[1] + r1[1]) / 4)
+            b.face([(l0[0], l0[1], z0), (r0[0], r0[1], z0), (r1[0], r1[1], z1), (l1[0], l1[1], z1)], (0, 0, 1),
+                   slot["floor"], [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256),
+                                   (r1[0] / 256, r1[1] / 256), (l1[0] / 256, l1[1] / 256)])
+            b.wall(l0, l1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
+            b.wall(r0, r1, z0, z1, z0 + wall_h, z1 + wall_h, mid, slot["wall"], dist[j])
+            if kind == "tunnel":
+                b.face([(l0[0], l0[1], z0 + hh), (r0[0], r0[1], z0 + hh), (r1[0], r1[1], z1 + hh),
+                        (l1[0], l1[1], z1 + hh)], (0, 0, -1), slot["ceiling"],
+                       [(l0[0] / 256, l0[1] / 256), (r0[0] / 256, r0[1] / 256), (r1[0] / 256, r1[1] / 256),
+                        (l1[0] / 256, l1[1] / 256)])
+    obj = b.build(name, mats or [None], collection)
+    obj["jfg_layout"] = json.dumps({"rooms": rooms, "links": links, "seed": seed}, default=str)
+    return obj
+
+
+def _inside_poly(poly, p):
+    x, y = p
+    hit = False
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            hit = not hit
+    return hit
+
+
+def _cut_outline(outline, cuts):
+    """The outline with each doorway's stretch (from corner p1 on edge e1 to corner p2 on edge e2) replaced by the
+    two corners: (points, {index of the gap edge: link})."""
+    n = len(outline)
+    marks = {}
+    for e1, p1, e2, p2, ln in cuts:
+        # walk forward (counter-clockwise) from the earlier corner to the later one along the outline
+        f1 = (e1 + _param(outline, e1, p1)) % n
+        f2 = (e2 + _param(outline, e2, p2)) % n
+        if (f2 - f1) % n > n / 2:
+            f1, f2, p1, p2 = f2, f1, p2, p1
+        marks[f1] = (f1, f2, p1, p2, ln)
+    pts, gaps = [], {}
+    i = 0.0
+    order = sorted(marks)
+    skip_to = None
+    for v in range(n):
+        if skip_to is not None and _between(v, skip_to[0], skip_to[1], n):
+            continue
+        cut = next((marks[f] for f in order if v <= f < v + 1), None)
+        pts.append(outline[v])
+        if cut is not None:
+            f1, f2, p1, p2, ln = cut
+            pts.append(p1)
+            gaps[len(pts) - 1] = ln
+            pts.append(p2)
+            skip_to = (f1, f2)
+    return pts, gaps
+
+
+def _param(outline, e, p):
+    a, b = outline[e], outline[(e + 1) % len(outline)]
+    length = math.hypot(b[0] - a[0], b[1] - a[1]) or 1
+    return min(0.999, max(0.0, math.hypot(p[0] - a[0], p[1] - a[1]) / length))
+
+
+def _between(v, f1, f2, n):
+    """Outline vertex v lies strictly inside the stretch from f1 forward to f2 (fractional positions)."""
+    return 0 < (v - f1) % n < (f2 - f1) % n
+
+
+def layout_report(obj):
+    """terrain_report for a layout, plus "steepest_floor": the steepest floor in degrees (links slope between
+    rooms; keep it under WALKABLE)."""
+    rep = terrain_report(obj)
+    steep = 0.0
+    nm = obj.matrix_world.to_3x3().inverted_safe().transposed()
+    for p in obj.data.polygons:
+        n = (nm @ p.normal).normalized()
+        if n.z > 0.3:
+            steep = max(steep, math.degrees(math.acos(min(1.0, n.z))))
+    rep["steepest_floor"] = round(steep, 1)
+    return rep
 
 
 def _is_game_image(image):

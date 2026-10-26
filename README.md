@@ -58,7 +58,7 @@ Everything the panel does is also a function, for scripts and AI agents (through
 `game_texture_material(tex_id, surface)`; organic shapes: `terrain(...)` (ground from layered noise: hills, ridges
 or terraces, with flat clearings, carved paths, a rim of hills round the edge and walkable slopes),
 `terrain_report(obj)`, `rock(...)` (a lumpy boulder), `ground_height(obj, x, y)` and
-`scatter_points(obj, count, ...)` (spots on its gentle ground). `export(collection=...)` works from any scene: it shows the collection's scene for
+`scatter_points(obj, count, ...)` (spots on its gentle ground); levels laid out as the game's are: `layout(name, rooms, links, floor, wall, ceiling)` (rooms of their own shapes and floor heights, joined by tunnels, corridors and canyons that cut doorways in them, with the game's own sizes) and `layout_report(obj)`. `export(collection=...)` works from any scene: it shows the collection's scene for
 the export and goes back, and nothing of another scene goes out. `budgets` names the images the game would
 shrink (`shrunk`). `help(jfg64)` lists them with the spaces and units each one takes; `export` returns
 what it wrote (path, objects, triangles). `jfg64.__version__` says which version is loaded: after updating the
