@@ -2,7 +2,7 @@
 
 A Blender add-on (Blender 5.2 or newer) for making level geometry for
 [JFG-Studio](https://github.com/VibinToast/JFG-Studio), the level and modpack editor for
-[Jet Force Gemini: Recompiled](https://github.com/VibinToast/JetForceGemini-Recomp). It makes the common steps quick
+[Jet Force Gemini: Recompiled](https://github.com/VibinToast/JetForceGemini-Recompiled). It makes the common steps quick
 and shows the game's budgets while you model. It writes nothing Studio can't also read from a plain glTF export.
 
 **Full guide: [the jfg64 add-on](https://jfg.vibintoast.com/blender) and
